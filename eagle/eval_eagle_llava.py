@@ -8,8 +8,7 @@ from eagle.model.ea_model import EaModel
 from eagle.model.modeling_llama_kv import LlamaForCausalLM
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers import LlamaForCausalLM as HfLlamaForCausalLM
-from mind_ad.model.builder import load_pretrained_model
-from mind_ad.eval.eval_llava import create_data_loader
+from llava.eval.llava_mixtral_eval import create_data_loader, load_pretrained_model
 
 def parse_arguments():
     parser = argparse.ArgumentParser()
@@ -26,6 +25,8 @@ def parse_arguments():
     parser.add_argument('--benchmark_dataset', type=str, default="ccdv/cnn_dailymail")
     parser.add_argument('--benchmark_dataset_version', type=str, default="3.0.0")
     parser.add_argument('--benchmark_dataset_json', type=str, default=None)
+    parser.add_argument('--image_dir', type=str, default="/mnt/volumes/cloudmodel-muses/llava_data")
+    # "/lpai/volumes/cloudmodel-muses/lt/data/llava_data"
 
     args, unknown = parser.parse_known_args()
     return args
@@ -54,15 +55,13 @@ with open(args.benchmark_dataset_json, 'r') as f:
     # questions = questions[57000:]
 
 tokenizer, bigmodel, image_processor, context_len = load_pretrained_model(
-            args.base_model_dir, model_base="llava_qwen", device_map="cuda", load_in_8bit=False, load_in_4bit=False)
+            args.base_model_dir, model_base="llava_qwen", load_in_8bit=False, load_in_4bit=False)
 dataset = create_data_loader(
     questions,
-    "/mnt/volumes/cloudmodel-muses/llava_data",
+    args.image_dir,
     tokenizer,
     image_processor,
     bigmodel.config,
-    conv_mode="qwen_instruct",
-    padding_side="right",
     batch_size=args.batch_size
 )
 
@@ -77,6 +76,7 @@ count = 0
 avg_acc_len = 0
 total_input_len = 0
 total_base_time = 0.
+total_vit_time = 0.
 
 # while count < args.benchmark_steps:
 for idx, data in enumerate(dataset):
@@ -88,6 +88,7 @@ for idx, data in enumerate(dataset):
     input_len = input_ids.shape[1]
 
     with torch.inference_mode():
+        vit_start = time.time()
         position_ids=None
         attention_mask=None
         inputs_embeds=None
@@ -107,6 +108,7 @@ for idx, data in enumerate(dataset):
             image_tensor.to(dtype=torch.float16, device='cuda', non_blocking=True),
             image_sizes=image_sizes
         )
+        vit_end = time.time()
 
         base_start = time.time()
         # output_ids = bigmodel.generate(
@@ -140,6 +142,7 @@ for idx, data in enumerate(dataset):
         avg_acc_lens += avg_acc_len
         total_input_len += input_len
         total_base_time += (base_end - base_start)
+        total_vit_time += (vit_end - vit_start)
         print("avg_acc_lens:", avg_acc_lens / (idx+1))
     if (idx == args.benchmark_steps):
         break
@@ -148,6 +151,7 @@ print("Batch size:", args.batch_size)
 print("Input len:", total_input_len / count)
 print("Avg output len:", total_token / count)
 print("Avg acc len:", avg_acc_lens / count)
+print("Avg vit time:", total_vit_time / count)
 print("benchmark_steps:", count)
 print("BASE TPS:", total_token / total_base_time)
 print("TPS:", total_token / total_time)
