@@ -342,7 +342,7 @@ def decode_regular(self,
         # draft_tokdns = get_draft_token(phrase_tokens)
         # print("big_new_tokens", big_new_tokens)
         # print("draft_tokdns", draft_tokdns)
-        self.sequence_length_buffer += new_token_len
+        self.sequence_length_buffer += new_token_len - 1
 
         print("phrase_tokens", phrase_tokens)
         input_ids = phrase_tokens
@@ -358,24 +358,16 @@ def decode_regular(self,
         self.runtime._set_tensor(next_context, "position_ids", position_ids)
         last_token_ids = self.sequence_length_buffer
         self.runtime._set_tensor(next_context, "last_token_ids", last_token_ids)
+        print("position_ids", position_ids)
 
-        if self.use_context_fmha_for_generation:
-            context_lengths_local = torch.ones_like(context_lengths,
-                                                    device='cuda').int() * new_token_len
-            host_context_lengths_local = torch.ones_like(context_lengths,
-                                                         device='cpu').int() * new_token_len
-            sequence_length = self.sequence_length_buffer.clone().reshape((batch_size * beam_width, ))
-            self.runtime._set_tensor(next_context, 'context_lengths', context_lengths_local)
-            self.runtime._set_tensor(next_context, 'host_context_lengths', host_context_lengths_local)
-            self.runtime._set_tensor(next_context, 'sequence_length', sequence_length)
-        # medusa_packed_mask_ = medusa_packed_mask[:, :new_token_len].clone()
-        # medusa_position_offsets_ = self.buffer['medusa_position_offsets'][:, :new_token_len].clone()
-        # self.runtime._set_tensor(
-            # next_context, 'medusa_packed_mask', medusa_packed_mask_)
-        # self.runtime._set_tensor(
-            # next_context, 'medusa_position_offsets', medusa_position_offsets_)
-        # print("medusa_packed_mask_", medusa_packed_mask_)
-        # print("medusa_position_offsets_", medusa_position_offsets_)
+        medusa_packed_mask_ = medusa_packed_mask[:, :new_token_len].clone()
+        medusa_position_offsets_ = self.buffer['medusa_position_offsets'][:, :new_token_len].clone()
+        self.runtime._set_tensor(
+            next_context, 'medusa_packed_mask', medusa_packed_mask_)
+        self.runtime._set_tensor(
+            next_context, 'medusa_position_offsets', medusa_position_offsets_)
+        print("medusa_packed_mask_", medusa_packed_mask_)
+        print("medusa_position_offsets_", medusa_position_offsets_)
 
         self.new_token_num = new_token_len
         # print("self.phrase_len", self.phrase_len)
@@ -388,8 +380,8 @@ def decode_regular(self,
                 generation_logits.append(generation_logit.clone().detach())
 
         should_stop = (big_new_tokens[0, -1] == self.end_ids)
-        # if (step == 3):
-            # exit()
+        if (step == 3):
+            exit()
 
         if should_stop is not None and should_stop.item():
             profile_fn(benchmark_profiler, generation_phase_step_count)

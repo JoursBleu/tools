@@ -56,9 +56,6 @@ dataset = create_data_loader(
     padding_side="right",
     batch_size=args.batch_size
 )
-llm_model_config = big_runner.session._model_config
-llm_model_config.tp_size = 1
-llm_table_size = llm_model_config.vocab_size
 
 # keys = {
     # "场景": 1,
@@ -69,23 +66,28 @@ llm_table_size = llm_model_config.vocab_size
     # "文本",
 # }
 phrases_list = [{
-    42192: [42192, 100183, 45995, pad_id], # "无灯路"
-    104527: [104527, 114913, 45995, pad_id], # "坑洼路"
-    100846: [100846, 119340, 45995, pad_id], # "泥泞路"
-    100817: [100817, pad_id, pad_id, pad_id], # "事故"
-    101178: [101178, 100686, pad_id, pad_id], # "道路施工"
-    104875: [104875, 99425, 99679, 100183], # "临时红绿灯"
-}]
-drafts_list = [{
-    "middle": [11],
-    "end": [
-        [20450, 25, 42192, 26, 101178, 31905, 25, 42192, 26, 56278, 30767, 111363, 7259], # 时间:无;道路类型:无;备选车道:[
-        [20450, 25, 106772, 26, 101178, 31905, 25, 42192, 26, 56278, 30767, 111363, 7259], # 时间:白天;道路类型:无;备选车道:[
-        [20450, 25, 108036, 26, 101178, 31905, 25, 42192, 26, 56278, 30767, 111363, 7259], # 时间:夜晚;道路类型:无;备选车道:[
-    ],
-}]
+    42192: [42192, 100183, 45995, 5265, 20450, 25], # "无灯路"];时间:
+    104527: [104527, 114913, 45995, 5265, 20450, 25], # "坑洼路"];时间:
+    100846: [100846, 119340, 45995, 5265, 20450, 25], # "泥泞路"];时间:
+    100817: [100817, 5265, 20450, 25], # "事故"];时间:
+    101178: [101178, 100686, 5265, 20450, 25], # "道路施工"];时间:
+    104875: [104875, 99425, 99679, 100183, 5265, 20450, 25], # "临时红绿灯"];时间:
+},
+{
+    42192: [42192, 26, 101178, 31905, 25, 42192, 26, 56278, 30767, 111363, 7259], # 无;道路类型:无;备选车道:[
+    106772: [106772, 26, 101178, 31905, 25, 42192, 26, 56278, 30767, 111363, 7259], # 白天;道路类型:无;备选车道:[
+    108036: [108036, 26, 101178, 31905, 25, 42192, 26, 56278, 30767, 111363, 7259], # 夜晚;道路类型:无;备选车道:[
+    5265: [5265, 35926, 39953, 111363, 25], # ];自车车道:
+},
+{
+    108704: [108704, 25], # ;文本:
+    104875: [104875, 99425, 99679, 100183, 25, 20412, 26, 108704, 25] # ;临时红绿灯:是;文本:
+},
+]
 status_end_list = {
-    0: 5265,
+    0: 25,
+    1: 25,
+    2: 25,
 }
 
 for phrases in phrases_list:
@@ -94,8 +96,14 @@ for phrases in phrases_list:
 
 def get_phrase_token(new_token, current_status=None):
     new_token_len = 1
+    # print("current_status", current_status)
     if current_status is not None and current_status < len(phrases_list):
+        phrases = phrases_list[current_status]
         new_token_item = new_token[0, -1].item()
+        # if new_token_item in phrases:
+            # new_token, new_token_len = phrases[new_token_item]
+            # current_status += 1
+
         # print("current_status", current_status)
         # print("new_token_item", new_token_item)
         if status_end_list[current_status] == new_token_item:
@@ -104,12 +112,13 @@ def get_phrase_token(new_token, current_status=None):
             phrases = phrases_list[current_status]
             if new_token_item in phrases:
                 new_token, new_token_len = phrases[new_token_item]
+                current_status += 1
                 # print("prase", new_token)
-    if new_token_len ==  1:
-        # print("base new_token:", new_token)
-        new_token = torch.concat((new_token, torch.tensor([[pad_id, ]]).to(torch.int32).cuda()), dim=-1)
-        new_token_len = 2
-        # print("fixed new_token:", new_token)
+    # if new_token_len ==  1:
+        # # print("base new_token:", new_token)
+        # new_token = torch.concat((new_token, torch.tensor([[pad_id, ]]).to(torch.int32).cuda()), dim=-1)
+        # new_token_len = 2
+        # # print("fixed new_token:", new_token)
 
     return new_token, new_token_len, current_status
 
@@ -132,7 +141,6 @@ total_vit_time = 0.
 with torch.inference_mode():
     # while count < args.benchmark_steps:
     for idx, data in enumerate(dataset):
-        llm_table_size = llm_model_config.vocab_size
         (input_ids, image_tensor, image_sizes, prompt) = data
         print("prompt:", prompt)
         # print("input_ids:", input_ids)
@@ -147,9 +155,9 @@ with torch.inference_mode():
             inputs,
             position_ids,
             attention_mask,
-            _,
+            past_key_values,
             input_embedding,
-            _
+            labels
         ) = bigmodel.prepare_inputs_labels_for_multimodal(
             input_ids,
             None,
@@ -170,31 +178,73 @@ with torch.inference_mode():
         base_end = time.time()
         # print("Outputs:", tokenizer.batch_decode(output_ids, skip_special_tokens=True))
 
+        print("Compiling...")
+        bigmodel = torch.compile(bigmodel, backend="inductor")
+
         # input_token_len = input_ids.shape[1]
         input_token_len = input_embedding.shape[1]
 
-        start = time.time()
-        input_ids = torch.concat((input_ids, get_prefix()), dim=-1)
+        print("inputs", inputs)
+        print("position_ids", position_ids)
+        print("attention_mask", attention_mask)
+        print("past_key_values", past_key_values)
+        print("input_embedding", input_embedding.shape)
+        print("labels", labels)
 
-        bigmodel(
+        print("Generating...")
+        start = time.time()
+        status = 0
+        new_tokens = []
+        new_tokens.append(get_prefix())
+        new_tokens_num = 2
+        input_ids = new_tokens[-1]
+        out = bigmodel(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
+            inputs_embeds=input_embedding,
             labels=labels,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict
+            use_cache=True,
+            output_attentions=None,
+            output_hidden_states=True,
+            return_dict=True
         )
+        big_new_tokens = torch.argmax(out["logits"], dim=-1)
+        phrase_tokens, new_token_len, status = get_phrase_token(big_new_tokens[:, -1:], status)
+        new_tokens = [phrase_tokens]
+        new_tokens_num += 1
+        print("new_tokens_num", new_tokens_num)
+        print("phrase_tokens", phrase_tokens)
+
+        while (new_tokens_num < args.max_new_tokens):
+            out = bigmodel(
+                input_ids=phrase_tokens,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=out["past_key_values"],
+                inputs_embeds=input_embedding,
+                labels=labels,
+                use_cache=True,
+                output_attentions=None,
+                output_hidden_states=True,
+                return_dict=True
+            )
+            big_new_tokens = torch.argmax(out["logits"], dim=-1)
+            phrase_tokens, new_token_len, status = get_phrase_token(big_new_tokens[:, -1:], status)
+            new_tokens.append(phrase_tokens)
+            new_tokens_num += new_token_len
+            print("new_tokens_num", new_tokens_num)
+            print("phrase_tokens", phrase_tokens)
+            if (big_new_tokens[0, -1] == tokenizer.eos_token_id):
+                break
 
         end = time.time()
 
         # print(outputs)
-        new_token = outputs['sequence_lengths'] - input_token_len + 2
+        new_token = new_tokens_num
         # generation_logits = outputs['generation_logits']
-        outputs = outputs['output_ids']
+        outputs = torch.concat(new_tokens, dim=-1)
         # print("outputs_id:", outputs.cpu())
         if False:
             outputs = outputs[:, input_token_len:]
