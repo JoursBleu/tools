@@ -124,7 +124,7 @@ def setup_fake_prompts(input_embedding):
         # prompt_table = ptuning_args['prompt_embedding_table']
         # prompt_table = torch.stack([prompt_table])
         # np.save(prompt_table_path, torch_to_numpy(prompt_table))
-    return input_ids.cuda(), ptuning_args
+    return input_ids, ptuning_args
 
 
 
@@ -285,8 +285,8 @@ def decode_regular(self,
     for step in range(0, self.max_new_tokens):
         start = time.time()
         # print("big step:", step)
-        print("big input_ids", input_ids.shape)
-        print("big prompt_embedding_table", prompt_embedding_table)
+        # print("big input_ids", input_ids.shape)
+        # print("big prompt_embedding_table", prompt_embedding_table.shape)
         print("before self.sequence_length_buffer", self.sequence_length_buffer)
         should_stop, next_step_tensors, tasks, context_lengths, host_context_lengths, attention_mask, logits, generation_logit, encoder_input_lengths, hidden_states_output = self.handle_per_step(
             cache_indirections, step, batch_size, max_context_length,
@@ -311,8 +311,6 @@ def decode_regular(self,
             # big_out_hidden_states = hidden_states_output
             accept_length = torch.Tensor([1]).to(torch.int32).cuda()
             context_lengths += 1
-            prompt_vocab_size = None
-            prompt_embedding_table = None
         else:
             generation_phase_step_count = generation_phase_step_count + 1
 
@@ -320,14 +318,12 @@ def decode_regular(self,
             big_new_tokens = torch.argmax(generation_logit, dim=-1)
             # print("generation_logit", generation_logit.shape)
             # exit()
-            print("hidden_states_output", hidden_states_output.shape)
-            print("hidden_states_output", hidden_states_output)
             print("big_new_tokens", big_new_tokens)
             print("big_new_phrase", tokenizer.decode(big_new_tokens[0]))
 
-            # posterior_mask = (input_ids[:, 1:] == big_new_tokens[:, :-1]).int()
-            # accept_length = (torch.cumprod(posterior_mask, dim=1)).sum(dim=1)
-            accept_length = torch.Tensor([0]).to(torch.int32).cuda()
+            posterior_mask = (input_ids[:, 1:] == big_new_tokens[:, :-1]).int()
+            accept_length = (torch.cumprod(posterior_mask, dim=1)).sum(dim=1)
+            # accept_length = torch.Tensor([0]).to(torch.int32).cuda()
             # print("accept_length", accept_length.dim())
             accept_length += 1
 
@@ -335,19 +331,22 @@ def decode_regular(self,
             big_new_tokens = big_new_tokens[:, :accept_length]
             self.update_kv_cache_draft_token_location(batch_size, self.medusa_paths[0][:new_token_len], accept_length)
 
-        # print("accept_length", accept_length)
+        print("accept_length", accept_length)
         current_len += accept_length.item()
         output_ids.append(big_new_tokens)
         print("accepted big_new_tokens", big_new_tokens)
         print("accepted big_new_phrase", tokenizer.decode(big_new_tokens[0]))
+        # print("self.sequence_length_buffer", self.sequence_length_buffer)
         phrase_tokens, new_token_len, status = get_phrase_token(big_new_tokens[:, -1:], status)
         # self.phrase_len = new_token_len-1
         # draft_tokdns = get_draft_token(phrase_tokens)
+        # print("big_new_tokens", big_new_tokens)
         # print("draft_tokdns", draft_tokdns)
         self.sequence_length_buffer += new_token_len
 
         print("phrase_tokens", phrase_tokens)
         input_ids = phrase_tokens
+        self.new_tokens = phrase_tokens
         next_context = self.runtime.context_1 if step % 2 else self.runtime.context_0
         self.runtime._set_tensor(next_context, "input_ids", input_ids.squeeze(0))
         position_ids = torch.arange(
@@ -365,14 +364,18 @@ def decode_regular(self,
                                                     device='cuda').int() * new_token_len
             host_context_lengths_local = torch.ones_like(context_lengths,
                                                          device='cpu').int() * new_token_len
-            # sequence_length = self.sequence_length_buffer.clone().reshape((batch_size * beam_width, ))
+            sequence_length = self.sequence_length_buffer.clone().reshape((batch_size * beam_width, ))
             self.runtime._set_tensor(next_context, 'context_lengths', context_lengths_local)
             self.runtime._set_tensor(next_context, 'host_context_lengths', host_context_lengths_local)
-            self.runtime._set_tensor(next_context, 'sequence_length', self.sequence_length_buffer.clone())
-        print("position_ids", position_ids)
-        print("last_token_ids", last_token_ids)
-        print("context_lengths_local", context_lengths_local)
-        print("host_context_lengths_local", host_context_lengths_local)
+            self.runtime._set_tensor(next_context, 'sequence_length', sequence_length)
+        # medusa_packed_mask_ = medusa_packed_mask[:, :new_token_len].clone()
+        # medusa_position_offsets_ = self.buffer['medusa_position_offsets'][:, :new_token_len].clone()
+        # self.runtime._set_tensor(
+            # next_context, 'medusa_packed_mask', medusa_packed_mask_)
+        # self.runtime._set_tensor(
+            # next_context, 'medusa_position_offsets', medusa_position_offsets_)
+        # print("medusa_packed_mask_", medusa_packed_mask_)
+        # print("medusa_position_offsets_", medusa_position_offsets_)
 
         self.new_token_num = new_token_len
         # print("self.phrase_len", self.phrase_len)
@@ -385,8 +388,8 @@ def decode_regular(self,
                 generation_logits.append(generation_logit.clone().detach())
 
         should_stop = (big_new_tokens[0, -1] == self.end_ids)
-        if (step == 3):
-            exit()
+        # if (step == 3):
+            # exit()
 
         if should_stop is not None and should_stop.item():
             profile_fn(benchmark_profiler, generation_phase_step_count)
@@ -687,6 +690,7 @@ with torch.inference_mode():
         # print("input_ids:", input_ids)
 
         input_ids = input_ids.to(device='cuda', non_blocking=True)
+        input_ids = torch.concat((input_ids, get_prefix()), dim=-1)
 
         vit_start = time.time()
         position_ids=None
@@ -729,7 +733,6 @@ with torch.inference_mode():
         # }
 
         # outputs = big_runner.generate(
-        input_ids = torch.concat((input_ids, get_prefix()), dim=-1)
         outputs = generate(
             big_runner,
             use_sp=args.use_sp,

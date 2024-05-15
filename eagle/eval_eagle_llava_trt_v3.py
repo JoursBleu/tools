@@ -50,6 +50,7 @@ tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
 if tokenizer.pad_token_id is None:
     tokenizer.pad_token_id = tokenizer.eos_token_id
 pad_id = tokenizer.pad_token_id
+eos_id = tokenizer.eos_token_id
 
 print("loading model")
 prompt_table_path = "/root/.cache/prompt_table.npy"
@@ -80,10 +81,11 @@ dataset = create_data_loader(
 )
 llm_model_config = big_runner.session._model_config
 llm_model_config.tp_size = 1
+llm_table_size = llm_model_config.vocab_size
 
 def ptuning_setup(embedding_table, input_ids):
     task_vocab_size = torch.tensor(
-        [embedding_table.shape[1]],
+        [input_ids.shape[1]],
         dtype=torch.int32,
     ).cuda()
     embedding_table = embedding_table.view(
@@ -110,11 +112,13 @@ def ptuning_setup(embedding_table, input_ids):
 
 def setup_fake_prompts(input_embedding):
     # Assemble fake prompts which points to input_embedding actually
-    fake_prompt_id = torch.arange(
-        llm_model_config.vocab_size, llm_model_config.vocab_size +
-        input_embedding.shape[0] * input_embedding.shape[1])
-    fake_prompt_id = fake_prompt_id.reshape(input_embedding.shape[0],
-                                            input_embedding.shape[1])
+    global llm_table_size
+    base = llm_table_size
+    print("input_embedding.shape[1]", input_embedding.shape[1])
+    llm_table_size += input_embedding.shape[1]
+    print("llm_table_size", llm_table_size)
+    # fake_prompt_id = torch.arange(base, llm_table_size)
+    fake_prompt_id = torch.arange(llm_model_config.vocab_size, llm_table_size).unsqueeze(0)
 
     input_ids = fake_prompt_id.contiguous().to(torch.int32)
 
@@ -222,6 +226,8 @@ def decode_regular(self,
                    encoder_input_lengths: torch.Tensor = None,
                    stopping_criteria: StoppingCriteria = None,
                    logits_processor: LogitsProcessor = None,
+                   kv_cache_block_pointers = [],
+                   host_kv_cache_block_pointers = [],
                    cross_attention_mask: torch.Tensor = None,
                    **kwargs):
     assert(batch_size == 1)
@@ -231,9 +237,11 @@ def decode_regular(self,
     context_logits = None
     generation_logits = []
     self.lm_head = bigmodel.lm_head
-    output_ids = [get_prefix()]
+    # output_ids = [get_prefix()]
+    output_ids = []
     status = 0
     self.phrase_len = 0
+    global llm_table_size
 
     def get_outputs_dict(output_ids):
         outputs = {}
@@ -278,16 +286,27 @@ def decode_regular(self,
                                           6, 7, 8, 9, 10,
                                           11, 12, 13, 14, 15,
                                           16, 17, 18, 19, 20]]).to(torch.int32)
-    accept_length = 0
-    # self.num_eagle_tokens = 1
+    accept_length = torch.Tensor([1]).to(torch.int32).cuda()
+    self.num_eagle_tokens = 1
     # last_token_ids = torch.cumsum(context_lengths.clone().detach(), dim=0).int()
     current_len = host_context_lengths.item() - 1
     for step in range(0, self.max_new_tokens):
+        self.setup(
+            batch_size=batch_size,
+            max_context_length=max_context_length,
+            max_new_tokens=self.max_new_tokens,)
+
         start = time.time()
         # print("big step:", step)
-        print("big input_ids", input_ids.shape)
-        print("big prompt_embedding_table", prompt_embedding_table)
-        print("before self.sequence_length_buffer", self.sequence_length_buffer)
+        # print("big input_ids", input_ids.shape)
+        # print("big prompt_embedding_table", prompt_embedding_table.shape)
+        self.sequence_length_buffer = 1
+        # print("before self.sequence_length_buffer", self.sequence_length_buffer)
+        # print("max_context_length", self.max_context_length)
+        # print("context_lengths", context_lengths)
+        # print("host_context_lengths", host_context_lengths)
+        # print("sequence_limit_lengths", sequence_limit_lengths)
+        # print("sequence_lengths", sequence_lengths)
         should_stop, next_step_tensors, tasks, context_lengths, host_context_lengths, attention_mask, logits, generation_logit, encoder_input_lengths, hidden_states_output = self.handle_per_step(
             cache_indirections, step, batch_size, max_context_length,
             beam_width, input_ids, None, scfg,
@@ -306,13 +325,9 @@ def decode_regular(self,
             if benchmark_profiler is not None:
                 benchmark_profiler.record_cuda_event('first_token')
 
-            generation_logit = self.lm_head(hidden_states_output[:, -1:, :])
+            generation_logit = self.lm_head(hidden_states_output[:, current_len:current_len+accept_length, :])
             big_new_tokens = torch.argmax(generation_logit, dim=-1)
             # big_out_hidden_states = hidden_states_output
-            accept_length = torch.Tensor([1]).to(torch.int32).cuda()
-            context_lengths += 1
-            prompt_vocab_size = None
-            prompt_embedding_table = None
         else:
             generation_phase_step_count = generation_phase_step_count + 1
 
@@ -320,8 +335,6 @@ def decode_regular(self,
             big_new_tokens = torch.argmax(generation_logit, dim=-1)
             # print("generation_logit", generation_logit.shape)
             # exit()
-            print("hidden_states_output", hidden_states_output.shape)
-            print("hidden_states_output", hidden_states_output)
             print("big_new_tokens", big_new_tokens)
             print("big_new_phrase", tokenizer.decode(big_new_tokens[0]))
 
@@ -337,17 +350,33 @@ def decode_regular(self,
 
         # print("accept_length", accept_length)
         current_len += accept_length.item()
+        self.sequence_length_buffer += accept_length
         output_ids.append(big_new_tokens)
+        phrase_tokens, new_token_len, status = get_phrase_token(big_new_tokens[:, -1:], status)
+        final_output_ids = phrase_tokens
+        return get_outputs_dict(final_output_ids)
+
         print("accepted big_new_tokens", big_new_tokens)
         print("accepted big_new_phrase", tokenizer.decode(big_new_tokens[0]))
+        # print("self.sequence_length_buffer", self.sequence_length_buffer)
         phrase_tokens, new_token_len, status = get_phrase_token(big_new_tokens[:, -1:], status)
         # self.phrase_len = new_token_len-1
         # draft_tokdns = get_draft_token(phrase_tokens)
+        # print("big_new_tokens", big_new_tokens)
         # print("draft_tokdns", draft_tokdns)
-        self.sequence_length_buffer += new_token_len
 
         print("phrase_tokens", phrase_tokens)
-        input_ids = phrase_tokens
+        input_embedding = small_model.model.embed_tokens(phrase_tokens)
+        input_ids, ptuning_args = setup_fake_prompts(input_embedding)
+        print("prompt_embedding_table", prompt_embedding_table.shape)
+        prompt_embedding_table = torch.concat((prompt_embedding_table, ptuning_args["prompt_embedding_table"]), dim=0)
+        print("prompt_embedding_table", prompt_embedding_table.shape)
+        tasks = ptuning_args["tasks"]
+        prompt_vocab_size = ptuning_args["prompt_vocab_size"]
+        context_lengths += new_token_len
+        host_context_lengths = context_lengths.cpu()
+        # input_ids = phrase_tokens
+        # self.new_tokens = phrase_tokens
         next_context = self.runtime.context_1 if step % 2 else self.runtime.context_0
         self.runtime._set_tensor(next_context, "input_ids", input_ids.squeeze(0))
         position_ids = torch.arange(
@@ -360,21 +389,16 @@ def decode_regular(self,
         last_token_ids = self.sequence_length_buffer
         self.runtime._set_tensor(next_context, "last_token_ids", last_token_ids)
 
-        if self.use_context_fmha_for_generation:
-            context_lengths_local = torch.ones_like(context_lengths,
-                                                    device='cuda').int() * new_token_len
-            host_context_lengths_local = torch.ones_like(context_lengths,
-                                                         device='cpu').int() * new_token_len
-            # sequence_length = self.sequence_length_buffer.clone().reshape((batch_size * beam_width, ))
-            self.runtime._set_tensor(next_context, 'context_lengths', context_lengths_local)
-            self.runtime._set_tensor(next_context, 'host_context_lengths', host_context_lengths_local)
-            self.runtime._set_tensor(next_context, 'sequence_length', self.sequence_length_buffer.clone())
-        print("position_ids", position_ids)
-        print("last_token_ids", last_token_ids)
-        print("context_lengths_local", context_lengths_local)
-        print("host_context_lengths_local", host_context_lengths_local)
+        medusa_packed_mask_ = medusa_packed_mask[:, :new_token_len].clone()
+        medusa_position_offsets_ = self.buffer['medusa_position_offsets'][:, :new_token_len].clone()
+        self.runtime._set_tensor(
+            next_context, 'medusa_packed_mask', medusa_packed_mask_)
+        self.runtime._set_tensor(
+            next_context, 'medusa_position_offsets', medusa_position_offsets_)
+        print("medusa_packed_mask_", medusa_packed_mask_)
+        print("medusa_position_offsets_", medusa_position_offsets_)
 
-        self.new_token_num = new_token_len
+        self.new_token_num = input_ids.shape[-1]
         # print("self.phrase_len", self.phrase_len)
         # print("self.new_token_num", self.new_token_num)
 
@@ -385,8 +409,6 @@ def decode_regular(self,
                 generation_logits.append(generation_logit.clone().detach())
 
         should_stop = (big_new_tokens[0, -1] == self.end_ids)
-        if (step == 3):
-            exit()
 
         if should_stop is not None and should_stop.item():
             profile_fn(benchmark_profiler, generation_phase_step_count)
@@ -458,11 +480,13 @@ def decode(self,
            stopping_criteria: StoppingCriteria = None,
            logits_processor: LogitsProcessor = None,
            cross_attention_mask: torch.Tensor = None,
+           max_context_length = None,
+           step=0,
            **kwargs):
     scfg = sampling_config
     batch_size = context_lengths.size(0)
     beam_width = scfg.num_beams
-    max_context_length = torch.max(context_lengths).item()
+    # max_context_length = torch.max(context_lengths).item()
     host_context_lengths = context_lengths.cpu()
     assert batch_size == self.batch_size, \
         "Given batch size is different from the one used in setup()," \
@@ -525,57 +549,58 @@ def decode(self,
         # hidden_states = torch.zeros((batch_size, self.max_seq_length, hidden_size))
 
     # # Init KV cache block manager
-    if self.paged_kv_cache:
-        bubble_len = 0
-        if self.sink_token_length % self.tokens_per_block > 0:
-            bubble_len += (self.tokens_per_block -
-                           self.sink_token_length % self.tokens_per_block)
-        max_blocks_per_seq = math.ceil(
-            (self.max_attention_window_size + bubble_len) /
-            self.tokens_per_block)
-        if self.use_one_more_block:
-            max_blocks_per_seq += 1
-        blocks = batch_size * beam_width * max_blocks_per_seq
-        memory_pools = [
-            self.buffer[f'present_key_value_{i}']
-            for i in range(self.first_layer, self.last_layer)
-        ]
-        self.kv_cache_manager = KVCacheManager(
-            memory_pools, blocks, self.tokens_per_block, max_blocks_per_seq,
-            self.max_attention_window_size, self.sink_token_length,
-            beam_width, self.use_one_more_block)
-
-        # Add sequences to the manager
-        for bi in range(batch_size):
-            generation_sequence = GenerationSequence(seq_idx=bi,
-                                                     batch_idx=bi)
-            self.kv_cache_manager.add_sequence(generation_sequence,
-                                               max_context_length)
-
-    if self.is_medusa_mode or self._model_config.eagle_mode > 0:
-        if self.quant_mode.has_kv_cache_quant():
-            # Since torch does not support fp8 now, using int8 here.
-            kv_cache_type = torch.int8
-        else:
-            kv_cache_type = self.dtype if self.paged_kv_cache else self._tensor_dtype(
-                f'present_key_value_{self.first_layer}')
-        self.history_max_seq_length = [max_context_length]
-        self.kv_cache_updater = KVCacheUpdater()
-        assert not self.cross_attention
-        assert self.use_gpt_attention_plugin
-
+    if step == 0:
         if self.paged_kv_cache:
-            self.kv_cache_updater.init_paged_kv_cache(
-                self.num_heads_kv, self.head_size, kv_cache_type,
-                self.kv_cache_manager)
-        else:
-            past_key_value_list = [
+            bubble_len = 0
+            if self.sink_token_length % self.tokens_per_block > 0:
+                bubble_len += (self.tokens_per_block -
+                               self.sink_token_length % self.tokens_per_block)
+            max_blocks_per_seq = math.ceil(
+                (self.max_attention_window_size + bubble_len) /
+                self.tokens_per_block)
+            if self.use_one_more_block:
+                max_blocks_per_seq += 1
+            blocks = batch_size * beam_width * max_blocks_per_seq
+            memory_pools = [
                 self.buffer[f'present_key_value_{i}']
                 for i in range(self.first_layer, self.last_layer)
             ]
-            self.kv_cache_updater.init_linear_kv_cache(
-                self.num_heads_kv, self.head_size, kv_cache_type,
-                past_key_value_list)
+            self.kv_cache_manager = KVCacheManager(
+                memory_pools, blocks, self.tokens_per_block, max_blocks_per_seq,
+                self.max_attention_window_size, self.sink_token_length,
+                beam_width, self.use_one_more_block)
+
+            # Add sequences to the manager
+            for bi in range(batch_size):
+                generation_sequence = GenerationSequence(seq_idx=bi,
+                                                         batch_idx=bi)
+                self.kv_cache_manager.add_sequence(generation_sequence,
+                                                   max_context_length)
+
+        if self.is_medusa_mode or self._model_config.eagle_mode > 0:
+            if self.quant_mode.has_kv_cache_quant():
+                # Since torch does not support fp8 now, using int8 here.
+                kv_cache_type = torch.int8
+            else:
+                kv_cache_type = self.dtype if self.paged_kv_cache else self._tensor_dtype(
+                    f'present_key_value_{self.first_layer}')
+            self.history_max_seq_length = [max_context_length]
+            self.kv_cache_updater = KVCacheUpdater()
+            assert not self.cross_attention
+            assert self.use_gpt_attention_plugin
+
+            if self.paged_kv_cache:
+                self.kv_cache_updater.init_paged_kv_cache(
+                    self.num_heads_kv, self.head_size, kv_cache_type,
+                    self.kv_cache_manager)
+            else:
+                past_key_value_list = [
+                    self.buffer[f'present_key_value_{i}']
+                    for i in range(self.first_layer, self.last_layer)
+                ]
+                self.kv_cache_updater.init_linear_kv_cache(
+                    self.num_heads_kv, self.head_size, kv_cache_type,
+                    past_key_value_list)
 
     # # start context phase
     # if streaming:
@@ -624,6 +649,8 @@ def generate(self,
              stopping_criteria: Optional[StoppingCriteria] = None,
              logits_processor: Optional[LogitsProcessor] = None,
              medusa_choices: Optional[List[List[int]]] = None,
+             max_context_length = 1024+512,
+             step = 0,
              **kwargs) -> Union[torch.Tensor, dict]:
     # Use sampling_config like HF's generation_config
     if sampling_config is None:
@@ -637,16 +664,17 @@ def generate(self,
     batch_input_ids, input_lengths = self._prepare_inputs(
         batch_input_ids, sampling_config.pad_id)
 
-    self.session.setup(
-        batch_size=batch_size,
-        max_context_length=input_lengths.max().item(),
-        max_new_tokens=sampling_config.max_new_tokens,
-        beam_width=sampling_config.num_beams,
-        max_attention_window_size=sampling_config.max_attention_window_size,
-        sink_token_length=sampling_config.sink_token_length,
-        lora_manager=self.lora_manager,
-        lora_uids=lora_uids,
-        medusa_choices=medusa_choices)
+    if step == 0:
+        self.session.setup(
+            batch_size=batch_size,
+            max_context_length=max_context_length,
+            max_new_tokens=sampling_config.max_new_tokens,
+            beam_width=sampling_config.num_beams,
+            max_attention_window_size=sampling_config.max_attention_window_size,
+            sink_token_length=sampling_config.sink_token_length,
+            lora_manager=self.lora_manager,
+            lora_uids=lora_uids,
+            medusa_choices=medusa_choices)
 
     batch_input_ids = batch_input_ids.cuda()
     input_lengths = input_lengths.cuda()
@@ -661,6 +689,7 @@ def generate(self,
         input_embedding,
         input_lengths,
         sampling_config,
+        max_context_length=max_context_length,
         use_sp=use_sp,
         stop_words_list=sampling_config.stop_words_list,
         bad_words_list=sampling_config.bad_words_list,
@@ -669,6 +698,7 @@ def generate(self,
         streaming=streaming,
         stopping_criteria=stopping_criteria,
         logits_processor=logits_processor,
+        step=step,
         **ptuning_kwargs)
     torch.cuda.set_stream(external_stream)
     if sampling_config.return_dict:
@@ -682,11 +712,13 @@ def generate(self,
 with torch.inference_mode():
     # while count < args.benchmark_steps:
     for idx, data in enumerate(dataset):
+        llm_table_size = llm_model_config.vocab_size
         (input_ids, image_tensor, image_sizes, prompt) = data
         print("prompt:", prompt)
         # print("input_ids:", input_ids)
 
         input_ids = input_ids.to(device='cuda', non_blocking=True)
+        # input_ids = torch.concat((input_ids, get_prefix()), dim=-1)
 
         vit_start = time.time()
         position_ids=None
@@ -727,39 +759,48 @@ with torch.inference_mode():
         # outputs = {
             # 'output_ids': [input_ids],
         # }
-
-        # outputs = big_runner.generate(
         input_ids = torch.concat((input_ids, get_prefix()), dim=-1)
-        outputs = generate(
-            big_runner,
-            use_sp=args.use_sp,
-            batch_input_ids=input_ids,
-            max_new_tokens=args.max_new_tokens,
-            end_id=tokenizer.eos_token_id,
-            pad_id=tokenizer.pad_token_id,
-            # temperature=temperature,
-            # top_k=top_k,
-            # top_p=top_p,
-            # num_beams=num_beams,
-            input_embedding=input_embedding,
-            # prompt_table_path=prompt_table_path,
-            ptuning_args=ptuning_args,
-            # stop_words_list=stop_words_list,
-            # bad_words_list=bad_words_list,
-            # early_stopping=early_stopping,
-            # stopping_criteria=stopping_criteria,
-            # streaming=streaming,
-            output_sequence_lengths=True,
-            return_dict=True
-        )
+
+        for i in range(args.max_new_tokens):
+            # outputs = big_runner.generate(
+            outputs = generate(
+                big_runner,
+                use_sp=args.use_sp,
+                batch_input_ids=input_ids,
+                max_new_tokens=args.max_new_tokens,
+                end_id=tokenizer.eos_token_id,
+                pad_id=tokenizer.pad_token_id,
+                # temperature=temperature,
+                # top_k=top_k,
+                # top_p=top_p,
+                # num_beams=num_beams,
+                input_embedding=input_embedding,
+                # prompt_table_path=prompt_table_path,
+                ptuning_args=ptuning_args,
+                # stop_words_list=stop_words_list,
+                # bad_words_list=bad_words_list,
+                # early_stopping=early_stopping,
+                # stopping_criteria=stopping_criteria,
+                # streaming=streaming,
+                output_sequence_lengths=True,
+                return_dict=True,
+                step=i,
+            )
+            input_ids = torch.concat((input_ids, outputs['output_ids']), dim=1)
+            should_stop = (outputs['output_ids'][0, -1] == eos_id)
+            print("outputs['output_ids']", input_ids[:, input_token_len:])
+            print("outputs['output_ids'] phrase", tokenizer.batch_decode(input_ids[:, input_token_len:]))
+            if (should_stop):
+                break
         end = time.time()
 
         # print(outputs)
         new_token = outputs['sequence_lengths'] - input_token_len + 2
         # generation_logits = outputs['generation_logits']
-        outputs = outputs['output_ids']
+        # outputs = outputs['output_ids']
+        outputs = input_ids
         # print("outputs_id:", outputs.cpu())
-        if False:
+        if True:
             outputs = outputs[:, input_token_len:]
         # print("generation_logits", generation_logits.shape)
         print("Step", idx, ":", end - start, "s")
