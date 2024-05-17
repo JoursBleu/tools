@@ -131,15 +131,6 @@ def setup_fake_prompts(input_embedding):
     return input_ids.cuda(), ptuning_args
 
 
-
-# keys = {
-    # "场景": 1,
-    # "时间",
-    # "道路类型",
-    # "备选车道",
-    # "自车车道",
-    # "文本",
-# }
 phrases_list = [{
     42192: [42192, 100183, 45995], # "无灯路"
     104527: [104527, 114913, 45995], # "坑洼路"
@@ -164,6 +155,10 @@ for phrases in phrases_list:
     for key in phrases:
         phrases[key] = (torch.Tensor(phrases[key]).to(torch.int32).unsqueeze(0).cuda(), len(phrases[key]))
 
+def get_prefix():
+    prefix = torch.Tensor([102122, 7259]).to(torch.int32).unsqueeze(0).cuda()
+    return prefix
+
 def get_phrase_token(new_token, current_status=None):
     new_token_len = 1
     if current_status is not None and current_status < len(phrases_list):
@@ -184,10 +179,6 @@ def get_phrase_token(new_token, current_status=None):
         # # print("fixed new_token:", new_token)
 
     return new_token, new_token_len, current_status
-
-def get_prefix():
-    prefix = torch.Tensor([102122, 7259]).to(torch.int32).unsqueeze(0).cuda()
-    return prefix
 
 
 total_time = 0

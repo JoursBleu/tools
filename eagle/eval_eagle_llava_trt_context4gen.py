@@ -165,7 +165,12 @@ for phrases in phrases_list:
     for key in phrases:
         phrases[key] = (torch.Tensor(phrases[key]).to(torch.int32).unsqueeze(0).cuda(), len(phrases[key]))
 
+is_temp_light = False
+
 def get_phrase_token(new_token, current_status=None):
+    global is_temp_light
+    if (current_status == 0 && new_token == 104875):
+        is_temp_light = True
     new_token_len = 1
     # print("current_status", current_status)
     if current_status is not None and current_status < len(phrases_list):
@@ -185,15 +190,12 @@ def get_phrase_token(new_token, current_status=None):
                 new_token, new_token_len = phrases[new_token_item]
                 current_status += 1
                 # print("prase", new_token)
-    # if new_token_len ==  1:
-        # # print("base new_token:", new_token)
-        # new_token = torch.concat((new_token, torch.tensor([[pad_id, ]]).to(torch.int32).cuda()), dim=-1)
-        # new_token_len = 2
-        # # print("fixed new_token:", new_token)
 
     return new_token, new_token_len, current_status
 
 def get_prefix():
+    global is_temp_light
+    is_temp_light = False
     prefix = torch.Tensor([102122, 7259]).to(torch.int32).unsqueeze(0).cuda()
     return prefix
 
@@ -299,7 +301,7 @@ def decode_regular(self,
         # print("big step:", step)
         # print("big input_ids", input_ids.shape)
         # print("big prompt_embedding_table", prompt_embedding_table.shape)
-        print("before self.sequence_length_buffer", self.sequence_length_buffer)
+        # print("before self.sequence_length_buffer", self.sequence_length_buffer)
         should_stop, next_step_tensors, tasks, context_lengths, host_context_lengths, attention_mask, logits, generation_logit, encoder_input_lengths, hidden_states_output = self.handle_per_step(
             cache_indirections, step, batch_size, max_context_length,
             beam_width, input_ids, None, scfg,
@@ -341,7 +343,7 @@ def decode_regular(self,
 
             # big_new_tokens = big_new_tokens[:, :accept_length]
             big_new_tokens = big_new_tokens[:, :accept_length]
-            self.update_kv_cache_draft_token_location(batch_size, self.medusa_paths[0][:new_token_len], accept_length)
+            # self.update_kv_cache_draft_token_location(batch_size, self.medusa_paths[0][:new_token_len], accept_length)
 
         # print("accept_length", accept_length)
         current_len += accept_length.item()
@@ -349,7 +351,7 @@ def decode_regular(self,
         # print("accepted big_new_tokens", big_new_tokens)
         # print("accepted big_new_phrase", tokenizer.decode(big_new_tokens[0]))
         # print("self.sequence_length_buffer", self.sequence_length_buffer)
-        phrase_tokens, new_token_len, status = get_phrase_token(big_new_tokens[:, -1:], status)
+        phrase_tokens, new_token_len, status = get_phrase_token(big_new_tokens[:, -1:], step)
         # self.phrase_len = new_token_len-1
         # draft_tokdns = get_draft_token(phrase_tokens)
         # print("big_new_tokens", big_new_tokens)
@@ -368,8 +370,10 @@ def decode_regular(self,
                         device='cuda'
                        )
         self.runtime._set_tensor(next_context, "position_ids", position_ids)
+        print("position_ids", position_ids)
         last_token_ids = self.sequence_length_buffer
         self.runtime._set_tensor(next_context, "last_token_ids", last_token_ids)
+        print("last_token_ids", last_token_ids)
 
         if self.use_context_fmha_for_generation:
             context_lengths_local = torch.ones_like(context_lengths,
@@ -380,6 +384,9 @@ def decode_regular(self,
             self.runtime._set_tensor(next_context, 'context_lengths', context_lengths_local)
             self.runtime._set_tensor(next_context, 'host_context_lengths', host_context_lengths_local)
             self.runtime._set_tensor(next_context, 'sequence_length', sequence_length)
+            print("context_lengths_local", context_lengths_local)
+            print("host_context_lengths_local", host_context_lengths_local)
+            print("sequence_length", sequence_length)
         # medusa_packed_mask_ = medusa_packed_mask[:, :new_token_len].clone()
         # medusa_position_offsets_ = self.buffer['medusa_position_offsets'][:, :new_token_len].clone()
         # self.runtime._set_tensor(
