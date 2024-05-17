@@ -53,9 +53,10 @@ if tokenizer.pad_token_id is None:
 pad_id = tokenizer.pad_token_id
 
 print("loading model")
-# medusa_choices=[[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]
-medusa_choices=[[0, 0,]]
-# medusa_choices=[[0,]]
+medusa_choices=[[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]
+# medusa_choices=[[0, 0, 0, 0, 0,]]
+# medusa_choices=[[0, 0,]]
+draft_token_len = len(medusa_choices[0])
 prompt_table_path = "/root/.cache/prompt_table.npy"
 big_runner = ModelRunner.from_dir(
     engine_dir=args.big_engine_dir,
@@ -132,15 +133,6 @@ def setup_fake_prompts(input_embedding):
     return input_ids, ptuning_args
 
 
-
-# keys = {
-    # "场景": 1,
-    # "时间",
-    # "道路类型",
-    # "备选车道",
-    # "自车车道",
-    # "文本",
-# }
 phrases_list = [{
     42192: [42192, 100183, 45995], # "无灯路"
     104527: [104527, 114913, 45995], # "坑洼路"
@@ -169,6 +161,9 @@ def get_prefix():
     prefix = torch.Tensor([102122, 7259]).to(torch.int32).unsqueeze(0).cuda()
     return prefix
 
+fake_draft_tensor = torch.tensor([[pad_id, pad_id, pad_id, pad_id, pad_id, pad_id,
+                              pad_id, pad_id, pad_id, pad_id,]]).to(torch.int32).cuda()
+
 def get_phrase_token(new_token, current_status=None):
     new_token_len = 1
     if current_status is not None and current_status < len(phrases_list) and False:
@@ -184,8 +179,8 @@ def get_phrase_token(new_token, current_status=None):
                 # print("prase", new_token)
     if new_token_len ==  1:
         # print("base new_token:", new_token)
-        new_token = torch.concat((new_token, torch.tensor([[pad_id, pad_id,]]).to(torch.int32).cuda()), dim=-1)
-        new_token_len = 3
+        new_token_len = len(medusa_choices[0]) + 1
+        new_token = torch.concat((new_token, fake_draft_tensor[:, :new_token_len-new_token.shape[-1]]), dim=-1)
         # print("fixed new_token:", new_token)
 
     return new_token, new_token_len, current_status
@@ -201,7 +196,7 @@ total_input_len = 0
 total_base_time = 0.
 total_vit_time = 0.
 
-def decode_regular(self,
+def decode_regular(self, small,
                    use_sp: bool,
                    batch_size: int,
                    scfg: SamplingConfig,
@@ -211,6 +206,7 @@ def decode_regular(self,
                    max_context_length: int,
                    beam_width: int,
                    cache_indirections: list,
+                   small_cache_indirections: list,
                    input_ids: torch.Tensor,
                    hidden_states: torch.Tensor,
                    prompt_embedding_table: torch.Tensor,
@@ -236,11 +232,16 @@ def decode_regular(self,
     context_logits = None
     generation_logits = []
     self.lm_head = bigmodel.lm_head
+    small.embed_tokens = bigmodel.model.embed_tokens
+    small.fc = small_model.fc
+    small.medusa_paths = self.medusa_paths
     # output_ids = [get_prefix()]
     # input_ids = torch.concat((input_ids.cuda(), get_prefix().squeeze(0)), dim=-1)
     output_ids = []
     status = 0
     self.phrase_len = 0
+    small.phrase_len = 0
+    small.new_token_num = 1
 
     def get_outputs_dict(output_ids):
         outputs = {}
@@ -273,20 +274,25 @@ def decode_regular(self,
     total_time = 0.
 
     next_step_tensors = None
+    next_step_tensors_s = None
     big_out_hidden_states = None
     input_embedding = hidden_states.clone()[:, 1:]
+    context_lengths_s = context_lengths.clone()
+    host_context_lengths_s = context_lengths_s.cpu()
+    small_sequence_lengths = sequence_lengths.clone()
+    tasks_s = tasks.clone()
+    encoder_input_lengths_s = encoder_input_lengths
     accept_length = 0
     # self.num_eagle_tokens = 1
     # last_token_ids = torch.cumsum(context_lengths.clone().detach(), dim=0).int()
-    current_len = host_context_lengths.item() - 1
     for step in range(0, self.max_new_tokens):
         start = time.time()
         # print("big step:", step)
-        # print("big input_ids", input_ids.shape)
+        print("big input_ids", input_ids.shape)
         # print("big prompt_embedding_table", prompt_embedding_table.shape)
         # print("before self.sequence_length_buffer", self.sequence_length_buffer)
-        torch.cuda.synchronize()
-        sys.stdout.flush()
+        # torch.cuda.synchronize()
+        # sys.stdout.flush()
         should_stop, next_step_tensors, tasks, context_lengths, host_context_lengths, attention_mask, logits, generation_logit, encoder_input_lengths, hidden_states_output = self.handle_per_step(
             cache_indirections, step, batch_size, max_context_length,
             beam_width, input_ids, hidden_states, scfg,
@@ -301,7 +307,6 @@ def decode_regular(self,
         end = time.time()
         total_time += end - start
         if step == 0:
-            self.sequence_length_buffer = context_lengths.detach().clone()
             if benchmark_profiler is not None:
                 benchmark_profiler.record_cuda_event('first_token')
 
@@ -311,6 +316,11 @@ def decode_regular(self,
             context_lengths += 1
             # print("big_new_tokens", big_new_tokens)
             # print("big_new_phrase", tokenizer.decode(big_new_tokens[0]))
+
+            ## for small
+            new_embedding = bigmodel.model.embed_tokens(big_new_tokens[:, -1:])
+            input_embedding = torch.concat((input_embedding, new_embedding), 1)
+            small_hidden_states = torch.concat((input_embedding, hidden_states_output), -1)
         else:
             generation_phase_step_count = generation_phase_step_count + 1
 
@@ -322,36 +332,59 @@ def decode_regular(self,
             # accept_length = (torch.cumprod(posterior_mask, dim=1)).sum(dim=1)
             # accept_length += 1
             accept_length = torch.Tensor([1]).to(torch.int32).cuda()
+            self.accept_lengths = accept_length
+            small.accept_lengths = accept_length
 
             # big_new_tokens = big_new_tokens[:, :accept_length]
             big_new_tokens = big_new_tokens[:, :accept_length]
             self.update_kv_cache_draft_token_location(batch_size, self.medusa_paths[0][:new_token_len], accept_length)
+            small.update_kv_cache_draft_token_location(batch_size, self.medusa_paths[0][:new_token_len], accept_length)
 
-        # print("accept_length", accept_length)
-        current_len += accept_length.item()
+            ## for small
+            hidden_states_output = hidden_states_output[:,accept_length-1:accept_length]
+            new_embedding = bigmodel.model.embed_tokens(big_new_tokens[:, -1:])
+            small_hidden_states = torch.concat((hidden_states_output, new_embedding), -1)
+
         output_ids.append(big_new_tokens)
-        # print("accepted big_new_tokens", torch.concat(output_ids, -1).cpu().numpy())
-        # print("accepted big_new_phrase", tokenizer.batch_decode(torch.concat(output_ids, -1).cpu().numpy(), skip_special_tokens=True))
-        # print("self.sequence_length_buffer", self.sequence_length_buffer)
         phrase_tokens, new_token_len, status = get_phrase_token(big_new_tokens, status)
-        # self.phrase_len = new_token_len-1
-        # draft_tokdns = get_draft_token(phrase_tokens)
-        # print("big_new_tokens", big_new_tokens)
-        # print("draft_tokdns", draft_tokdns)
-        # self.sequence_length_buffer += accept_length
 
-        # print("phrase_tokens", phrase_tokens)
-        input_ids = phrase_tokens
+        small_step = step
+        small.sequence_length_buffer = self.sequence_length_buffer
+        draft_tokens = [big_new_tokens[:, -1:]]
+        small_hidden_states = small_model.fc(small_hidden_states).squeeze(0)
+        print("small_hidden_states", small_hidden_states.shape)
+        print("draft_tokens", draft_tokens)
+        for idx in range(draft_token_len):
+            print("small: input small.sequence_length_buffer", small.sequence_length_buffer)
+            # print("input small_hidden_states", small_hidden_states.shape)
+            _, next_step_tensors_s, tasks_s, context_lengths_s, host_context_lengths_s, _, _, generation_logit_s, encoder_input_lengths_s, hidden_states_output_s = small.handle_per_step(
+                small_cache_indirections, small_step+idx, batch_size, max_context_length,
+                beam_width, input_ids, small_hidden_states, scfg,
+                None, None, None, tasks_s, context_lengths_s,
+                host_context_lengths_s, None, cross_attention_mask,
+                None, ite, sequence_limit_lengths,
+                small_sequence_lengths, next_step_tensors_s, stop_words_list,
+                bad_words_list, no_repeat_ngram_size, encoder_output,
+                encoder_input_lengths_s, stopping_criteria, logits_processor,
+                **kwargs)
+            print("input_ids", small.new_tokens)
+            draft_tokens.append(small.new_tokens)
+            small.sequence_length_buffer += 1
+            self.stream.synchronize()
+            sys.stdout.flush()
+
+        # input_ids = phrase_tokens
+        input_ids = torch.concat(draft_tokens, dim=-1)
+        print("input_ids", input_ids)
         next_context = self.runtime.context_1 if step % 2 else self.runtime.context_0
         self.runtime._set_tensor(next_context, "input_ids", input_ids.squeeze(0))
 
         self.new_token_num = new_token_len
-        # print("self.phrase_len", self.phrase_len)
         # print("self.new_token_num", self.new_token_num)
 
         should_stop = (big_new_tokens[0, -1] == self.end_ids)
-        # if (step == 3):
-            # exit()
+        if step == 3:
+            exit()
 
         if should_stop is not None and should_stop.item():
             profile_fn(benchmark_profiler, generation_phase_step_count)
@@ -403,7 +436,7 @@ def decode_regular(self,
         return None
 
 
-def decode(self,
+def decode(self, small,
            input_ids: torch.Tensor,
            input_embedding: torch.Tensor,
            context_lengths: torch.Tensor,
@@ -481,6 +514,24 @@ def decode(self,
                    dtype=torch.int32,
                    device=self.device)
     ]  # ping-pong buffers
+    small_cache_indirections = [
+        torch.full((
+                        batch_size,
+                        beam_width,
+                        self.max_attention_window_size,
+                    ),
+                   0,
+                   dtype=torch.int32,
+                   device=self.device),
+        torch.full((
+                        batch_size,
+                        beam_width,
+                        self.max_attention_window_size,
+                    ),
+                   0,
+                   dtype=torch.int32,
+                   device=self.device)
+    ]  # ping-pong buffers
 
     # hidden_states = None
     # if self.mapping.has_pp():
@@ -542,6 +593,30 @@ def decode(self,
                 self.num_heads_kv, self.head_size, kv_cache_type,
                 past_key_value_list)
 
+        if small.quant_mode.has_kv_cache_quant():
+            # Since torch does not support fp8 now, using int8 here.
+            kv_cache_type = torch.int8
+        else:
+            kv_cache_type = small.dtype if small.paged_kv_cache else small._tensor_dtype(
+                f'present_key_value_{small.first_layer}')
+        small.history_max_seq_length = [max_context_length]
+        small.kv_cache_updater = KVCacheUpdater()
+        assert not small.cross_attention
+        assert small.use_gpt_attention_plugin
+
+        if small.paged_kv_cache:
+            small.kv_cache_updater.init_paged_kv_cache(
+                small.num_heads_kv, small.head_size, kv_cache_type,
+                small.kv_cache_manager)
+        else:
+            past_key_value_list = [
+                small.buffer[f'present_key_value_{i}']
+                for i in range(small.first_layer, small.last_layer)
+            ]
+            small.kv_cache_updater.init_linear_kv_cache(
+                small.num_heads_kv, small.head_size, kv_cache_type,
+                past_key_value_list)
+
     # # start context phase
     # if streaming:
         # return self.decode_stream(
@@ -565,10 +640,10 @@ def decode(self,
             # encoder_output, encoder_input_lengths, stopping_criteria,
             # logits_processor, cross_attention_mask, **kwargs)
     return decode_regular(
-        self, use_sp,
+        self, small, use_sp,
         batch_size, scfg, sequence_lengths, context_lengths,
         host_context_lengths, max_context_length, beam_width,
-        cache_indirections, input_ids, input_embedding,
+        cache_indirections, small_cache_indirections, input_ids, input_embedding,
         prompt_embedding_table, tasks, prompt_vocab_size, ite,
         sequence_limit_lengths, stop_words_list, bad_words_list,
         no_repeat_ngram_size, output_sequence_lengths, return_dict,
@@ -576,7 +651,7 @@ def decode(self,
         logits_processor, cross_attention_mask, **kwargs)
 
 
-def generate(self,
+def generate(self, small_runner,
              batch_input_ids: List[torch.Tensor],
              input_embedding: torch.Tensor = None,
              use_sp: bool = False,
@@ -613,6 +688,17 @@ def generate(self,
         lora_uids=lora_uids,
         medusa_choices=medusa_choices)
 
+    small_runner.session.setup(
+        batch_size=batch_size,
+        max_context_length=input_lengths.max().item(),
+        max_new_tokens=sampling_config.max_new_tokens,
+        beam_width=sampling_config.num_beams,
+        max_attention_window_size=sampling_config.max_attention_window_size,
+        sink_token_length=sampling_config.sink_token_length,
+        lora_manager=self.lora_manager,
+        lora_uids=lora_uids,
+        medusa_choices=None)
+
     batch_input_ids = batch_input_ids.cuda()
     input_lengths = input_lengths.cuda()
     ptuning_kwargs = ptuning_args
@@ -622,6 +708,7 @@ def generate(self,
     torch.cuda.set_stream(self.session.stream)
     outputs = decode(
         self.session,
+        small_runner.session,
         batch_input_ids,
         input_embedding,
         input_lengths,
@@ -697,6 +784,7 @@ with torch.inference_mode():
         # outputs = big_runner.generate(
         outputs = generate(
             big_runner,
+            small_runner,
             use_sp=args.use_sp,
             batch_input_ids=input_ids,
             max_new_tokens=args.max_new_tokens,
