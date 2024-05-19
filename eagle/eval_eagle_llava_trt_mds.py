@@ -338,12 +338,12 @@ def decode_regular(self, small,
             # big_new_tokens = big_new_tokens[:, :accept_length]
             big_new_tokens = big_new_tokens[:, :accept_length]
             self.update_kv_cache_draft_token_location(batch_size, self.medusa_paths[0][:new_token_len], accept_length)
-            small.update_kv_cache_draft_token_location(batch_size, self.medusa_paths[0][:new_token_len], accept_length)
 
             ## for small
             hidden_states_output = hidden_states_output[:,accept_length-1:accept_length]
             new_embedding = bigmodel.model.embed_tokens(big_new_tokens[:, -1:])
             small_hidden_states = torch.concat((hidden_states_output, new_embedding), -1)
+            small.update_kv_cache_draft_token_location(batch_size, self.medusa_paths[0][:new_token_len], accept_length)
 
         output_ids.append(big_new_tokens)
         phrase_tokens, new_token_len, status = get_phrase_token(big_new_tokens, status)
@@ -383,8 +383,6 @@ def decode_regular(self, small,
         # print("self.new_token_num", self.new_token_num)
 
         should_stop = (big_new_tokens[0, -1] == self.end_ids)
-        if step == 3:
-            exit()
 
         if should_stop is not None and should_stop.item():
             profile_fn(benchmark_profiler, generation_phase_step_count)

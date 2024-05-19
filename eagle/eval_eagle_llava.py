@@ -8,7 +8,10 @@ from eagle.model.ea_model import EaModel
 from eagle.model.modeling_llama_kv import LlamaForCausalLM
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers import LlamaForCausalLM as HfLlamaForCausalLM
-from llava.eval.llava_mixtral_eval import create_data_loader, load_pretrained_model
+
+import mind_ad
+from mind_ad.model.builder import load_pretrained_model
+from mind_ad.eval.eval_llava import create_data_loader
 
 def parse_arguments():
     parser = argparse.ArgumentParser()
@@ -55,13 +58,15 @@ with open(args.benchmark_dataset_json, 'r') as f:
     # questions = questions[57000:]
 
 tokenizer, bigmodel, image_processor, context_len = load_pretrained_model(
-            args.base_model_dir, model_base="llava_qwen", load_in_8bit=False, load_in_4bit=False)
+            args.base_model_dir, model_base="llava_qwen", device_map="cuda", load_in_8bit=False, load_in_4bit=False)
 dataset = create_data_loader(
     questions,
     args.image_dir,
     tokenizer,
     image_processor,
     bigmodel.config,
+    conv_mode="qwen_instruct",
+    padding_side="right",
     batch_size=args.batch_size
 )
 
@@ -78,26 +83,26 @@ total_input_len = 0
 total_base_time = 0.
 total_vit_time = 0.
 
-# while count < args.benchmark_steps:
-for idx, data in enumerate(dataset):
-    (input_ids, image_tensor, image_sizes, prompt) = data
-    print("prompt:", prompt)
-    print("input_ids:", input_ids)
+with torch.inference_mode():
+    # while count < args.benchmark_steps:
+    for idx, data in enumerate(dataset):
+        (input_ids, image_tensor, image_sizes, prompt) = data
+        print("prompt:", prompt)
+        print("input_ids:", input_ids)
 
-    input_ids = input_ids.to(device='cuda', non_blocking=True)
-    input_len = input_ids.shape[1]
+        input_ids = input_ids.to(device='cuda', non_blocking=True)
+        input_len = input_ids.shape[1]
 
-    with torch.inference_mode():
         vit_start = time.time()
         position_ids=None
         attention_mask=None
-        inputs_embeds=None
+        input_embedding=None
         (
             inputs,
             position_ids,
             attention_mask,
             _,
-            inputs_embeds,
+            input_embedding,
             _
         ) = bigmodel.prepare_inputs_labels_for_multimodal(
             input_ids,
@@ -114,43 +119,44 @@ for idx, data in enumerate(dataset):
         # output_ids = bigmodel.generate(
             # position_ids=position_ids,
             # attention_mask=attention_mask,
-            # inputs_embeds=inputs_embeds
+            # input_embedding=input_embedding
         # )
         base_end = time.time()
         # print("Outputs:", tokenizer.batch_decode(output_ids, skip_special_tokens=True))
 
-    start = time.time()
-    if (args.use_sp):
-        outputs, avg_acc_len = model.eagenerate(input_ids.cuda(), inputs_embeds.cuda(), max_new_tokens=args.max_new_tokens)
-        # outputs, avg_acc_len = model.eagenerate(batch.cuda(), top_p=0.9, temperature=0.5, max_new_tokens=args.max_new_tokens)
-    else:
-        outputs = model.naivegenerate(input_ids.cuda(), inputs_embeds.cuda(), max_new_tokens=args.max_new_tokens)
-        # outputs = model.naivegenerate(batch.cuda(), top_p=0.9, temperature=0.5, max_new_tokens=args.max_new_tokens)
-    end = time.time()
-    print("outputs_id:", outputs.cpu())
-    outputs = outputs[:, input_len:]
-    print("Step", idx, ":", end - start, "s")
-    print("Outputs:", tokenizer.batch_decode(outputs, skip_special_tokens=True))
-    new_token = outputs.numel()
-    print("Total new token:", new_token)
-    print("Avg acc len:", avg_acc_len)
+        start = time.time()
+        if (args.use_sp):
+            outputs, avg_acc_len = model.eagenerate(input_ids.cuda(), input_embedding.cuda(), max_new_tokens=args.max_new_tokens)
+            # outputs, avg_acc_len = model.eagenerate(batch.cuda(), top_p=0.9, temperature=0.5, max_new_tokens=args.max_new_tokens)
+        else:
+            outputs = model.naivegenerate(input_ids.cuda(), input_embedding.cuda(), max_new_tokens=args.max_new_tokens)
+            # outputs = model.naivegenerate(batch.cuda(), top_p=0.9, temperature=0.5, max_new_tokens=args.max_new_tokens)
+        end = time.time()
+        print("outputs_id:", outputs.cpu())
+        outputs = outputs[:, input_len:]
+        print("Step", idx, ":", end - start, "s")
+        print("Outputs:", tokenizer.batch_decode(outputs, skip_special_tokens=True))
+        new_token = outputs.numel()
+        print("Total new token:", new_token)
+        print("Avg acc len:", avg_acc_len)
 
-    if (idx > 1):
-        count += 1
-        total_time += (end - start)
-        total_token += new_token
-        avg_acc_lens += avg_acc_len
-        total_input_len += input_len
-        total_base_time += (base_end - base_start)
-        total_vit_time += (vit_end - vit_start)
-        print("avg_acc_lens:", avg_acc_lens / (idx+1))
-    if (idx == args.benchmark_steps):
-        break
+        if (idx > 1):
+            count += 1
+            total_time += (end - start)
+            total_token += new_token
+            avg_acc_lens += avg_acc_len
+            total_input_len += input_len
+            total_base_time += (base_end - base_start)
+            total_vit_time += (vit_end - vit_start)
+            print("avg_acc_lens:", avg_acc_lens / (idx+1))
+        if (idx == args.benchmark_steps):
+            break
 print("Total steps:", args.benchmark_steps)
 print("Batch size:", args.batch_size)
 print("Input len:", total_input_len / count)
 print("Avg output len:", total_token / count)
 print("Avg acc len:", avg_acc_lens / count)
+print("Avg token/step:", avg_acc_lens / count + 1)
 print("Avg vit time:", total_vit_time / count)
 print("benchmark_steps:", count)
 print("BASE TPS:", total_token / total_base_time)
