@@ -114,6 +114,7 @@ with torch.inference_mode():
             image_sizes=image_sizes
         )
         vit_end = time.time()
+        print("input_embedding:", input_embedding)
 
         base_start = time.time()
         # output_ids = bigmodel.generate(
