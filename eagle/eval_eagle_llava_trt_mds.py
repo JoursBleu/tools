@@ -35,6 +35,7 @@ def parse_arguments():
     parser.add_argument('--max_new_tokens', type=int, default=128)
     parser.add_argument('--dtype', type=str, default="float16")
     parser.add_argument('--use_sp', action="store_true", default=False)
+    parser.add_argument('--use_mds', action="store_true", default=False)
     parser.add_argument('--use_table_search', action="store_true", default=False)
     parser.add_argument('--benchmark', action="store_true", default=False)
     parser.add_argument('--batch_size', type=int, default=1)
@@ -65,7 +66,7 @@ pad_id = tokenizer.pad_token_id
 
 print("loading model")
 draft_token_len = 10
-medusa_choices=[[0] * draft_token_len]
+medusa_choices = [[0] * draft_token_len] if args.use_mds else None
 # medusa_choices=[[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]
 # medusa_choices=[[0, 0, 0, 0, 0,]]
 # medusa_choices=[[0, 0,]]
@@ -73,7 +74,7 @@ prompt_table_path = "/root/.cache/prompt_table.npy"
 big_runner = ModelRunner.from_dir(
     engine_dir=args.big_engine_dir,
     rank=tensorrt_llm.mpi_rank(),
-    medusa_choices=medusa_choices
+    medusa_choices=medusa_choices,
 )
 small_runner = ModelRunner.from_dir(
     engine_dir=args.small_engine_dir,
@@ -314,6 +315,9 @@ total_input_len = 0
 total_base_time = 0.
 total_vit_time = 0.
 
+total_generate_time = 0.
+sp_time = 0.
+prefill = 0.
 def decode_regular(self, small,
                    use_sp: bool,
                    batch_size: int,
@@ -344,6 +348,11 @@ def decode_regular(self, small,
                    cross_attention_mask: torch.Tensor = None,
                    **kwargs):
     assert(batch_size == 1)
+    global sp_time
+    global total_generate_time
+    sp_time = 0.
+    total_generate_time = 0.
+    prefill = 0.
     kv_cache_block_pointers = []
     host_kv_cache_block_pointers = []
     attention_mask = None
@@ -357,6 +366,8 @@ def decode_regular(self, small,
     # input_ids = torch.concat((input_ids.cuda(), get_prefix().squeeze(0)), dim=-1)
     status = 0
     self.phrase_len = 0
+    self.total_generate_time = 0.
+    self.lm_head_time = 0.
     small.phrase_len = 0
     small.new_token_num = 1
     choices = Choices()
@@ -392,8 +403,6 @@ def decode_regular(self, small,
                                                 step_count)
 
     self.total_time = 0.
-    total_time = 0.
-    sp_time = 0.
     eagle_model.ea_layer.reset_kv()
 
     next_step_tensors = None
@@ -412,150 +421,6 @@ def decode_regular(self, small,
     new_token_len = draft_token_len + 1
     for step in range(0, self.max_new_tokens):
         start = time.time()
-        # print("big step:", step)
-        # print("big input_ids", input_ids.shape)
-        # print("big prompt_embedding_table", prompt_embedding_table.shape)
-        # print("before self.sequence_length_buffer", self.sequence_length_buffer)
-        # torch.cuda.synchronize()
-        # sys.stdout.flush()
-        if (step>0) and False:
-            print('context_lengths', next_step_tensors['context_lengths'].to_torch())
-            print('cache_indirection', next_step_tensors['cache_indirection'].to_torch())
-            print('last_token_ids', next_step_tensors['last_token_ids'].to_torch())
-            print('hidden_states_output', next_step_tensors['hidden_states_output'].to_torch())
-            print('host_context_lengths', next_step_tensors['host_context_lengths'].to_torch())
-            print('position_ids', next_step_tensors['position_ids'].to_torch())
-            print('prompt_embedding_table', next_step_tensors['prompt_embedding_table'].to_torch())
-            print('tasks', next_step_tensors['tasks'].to_torch())
-            print('prompt_vocab_size', next_step_tensors['prompt_vocab_size'].to_torch())
-            print('past_key_value_0', next_step_tensors['past_key_value_0'].to_torch())
-            print('present_key_value_0', next_step_tensors['present_key_value_0'].to_torch())
-            print('past_key_value_1', next_step_tensors['past_key_value_1'].to_torch())
-            print('present_key_value_1', next_step_tensors['present_key_value_1'].to_torch())
-            print('past_key_value_2', next_step_tensors['past_key_value_2'].to_torch())
-            print('present_key_value_2', next_step_tensors['present_key_value_2'].to_torch())
-            print('past_key_value_3', next_step_tensors['past_key_value_3'].to_torch())
-            print('present_key_value_3', next_step_tensors['present_key_value_3'].to_torch())
-            print('past_key_value_4', next_step_tensors['past_key_value_4'].to_torch())
-            print('present_key_value_4', next_step_tensors['present_key_value_4'].to_torch())
-            print('past_key_value_5', next_step_tensors['past_key_value_5'].to_torch())
-            print('present_key_value_5', next_step_tensors['present_key_value_5'].to_torch())
-            print('past_key_value_6', next_step_tensors['past_key_value_6'].to_torch())
-            print('present_key_value_6', next_step_tensors['present_key_value_6'].to_torch())
-            print('past_key_value_7', next_step_tensors['past_key_value_7'].to_torch())
-            print('present_key_value_7', next_step_tensors['present_key_value_7'].to_torch())
-            print('past_key_value_8', next_step_tensors['past_key_value_8'].to_torch())
-            print('present_key_value_8', next_step_tensors['present_key_value_8'].to_torch())
-            print('past_key_value_9', next_step_tensors['past_key_value_9'].to_torch())
-            print('present_key_value_9', next_step_tensors['present_key_value_9'].to_torch())
-            print('past_key_value_10', next_step_tensors['past_key_value_10'].to_torch())
-            print('present_key_value_10', next_step_tensors['present_key_value_10'].to_torch())
-            print('past_key_value_11', next_step_tensors['past_key_value_11'].to_torch())
-            print('present_key_value_11', next_step_tensors['present_key_value_11'].to_torch())
-            print('past_key_value_12', next_step_tensors['past_key_value_12'].to_torch())
-            print('present_key_value_12', next_step_tensors['present_key_value_12'].to_torch())
-            print('past_key_value_13', next_step_tensors['past_key_value_13'].to_torch())
-            print('present_key_value_13', next_step_tensors['present_key_value_13'].to_torch())
-            print('past_key_value_14', next_step_tensors['past_key_value_14'].to_torch())
-            print('present_key_value_14', next_step_tensors['present_key_value_14'].to_torch())
-            print('past_key_value_15', next_step_tensors['past_key_value_15'].to_torch())
-            print('present_key_value_15', next_step_tensors['present_key_value_15'].to_torch())
-            print('past_key_value_16', next_step_tensors['past_key_value_16'].to_torch())
-            print('present_key_value_16', next_step_tensors['present_key_value_16'].to_torch())
-            print('past_key_value_17', next_step_tensors['past_key_value_17'].to_torch())
-            print('present_key_value_17', next_step_tensors['present_key_value_17'].to_torch())
-            print('past_key_value_18', next_step_tensors['past_key_value_18'].to_torch())
-            print('present_key_value_18', next_step_tensors['present_key_value_18'].to_torch())
-            print('past_key_value_19', next_step_tensors['past_key_value_19'].to_torch())
-            print('present_key_value_19', next_step_tensors['present_key_value_19'].to_torch())
-            print('past_key_value_20', next_step_tensors['past_key_value_20'].to_torch())
-            print('present_key_value_20', next_step_tensors['present_key_value_20'].to_torch())
-            print('past_key_value_21', next_step_tensors['past_key_value_21'].to_torch())
-            print('present_key_value_21', next_step_tensors['present_key_value_21'].to_torch())
-            print('past_key_value_22', next_step_tensors['past_key_value_22'].to_torch())
-            print('present_key_value_22', next_step_tensors['present_key_value_22'].to_torch())
-            print('past_key_value_23', next_step_tensors['past_key_value_23'].to_torch())
-            print('present_key_value_23', next_step_tensors['present_key_value_23'].to_torch())
-            print('past_key_value_24', next_step_tensors['past_key_value_24'].to_torch())
-            print('present_key_value_24', next_step_tensors['present_key_value_24'].to_torch())
-            print('past_key_value_25', next_step_tensors['past_key_value_25'].to_torch())
-            print('present_key_value_25', next_step_tensors['present_key_value_25'].to_torch())
-            print('past_key_value_26', next_step_tensors['past_key_value_26'].to_torch())
-            print('present_key_value_26', next_step_tensors['present_key_value_26'].to_torch())
-            print('past_key_value_27', next_step_tensors['past_key_value_27'].to_torch())
-            print('present_key_value_27', next_step_tensors['present_key_value_27'].to_torch())
-            print('past_key_value_28', next_step_tensors['past_key_value_28'].to_torch())
-            print('present_key_value_28', next_step_tensors['present_key_value_28'].to_torch())
-            print('past_key_value_29', next_step_tensors['past_key_value_29'].to_torch())
-            print('present_key_value_29', next_step_tensors['present_key_value_29'].to_torch())
-            print('past_key_value_30', next_step_tensors['past_key_value_30'].to_torch())
-            print('present_key_value_30', next_step_tensors['present_key_value_30'].to_torch())
-            print('past_key_value_31', next_step_tensors['past_key_value_31'].to_torch())
-            print('present_key_value_31', next_step_tensors['present_key_value_31'].to_torch())
-            print('past_key_value_32', next_step_tensors['past_key_value_32'].to_torch())
-            print('present_key_value_32', next_step_tensors['present_key_value_32'].to_torch())
-            print('past_key_value_33', next_step_tensors['past_key_value_33'].to_torch())
-            print('present_key_value_33', next_step_tensors['present_key_value_33'].to_torch())
-            print('past_key_value_34', next_step_tensors['past_key_value_34'].to_torch())
-            print('present_key_value_34', next_step_tensors['present_key_value_34'].to_torch())
-            print('past_key_value_35', next_step_tensors['past_key_value_35'].to_torch())
-            print('present_key_value_35', next_step_tensors['present_key_value_35'].to_torch())
-            print('past_key_value_36', next_step_tensors['past_key_value_36'].to_torch())
-            print('present_key_value_36', next_step_tensors['present_key_value_36'].to_torch())
-            print('past_key_value_37', next_step_tensors['past_key_value_37'].to_torch())
-            print('present_key_value_37', next_step_tensors['present_key_value_37'].to_torch())
-            print('past_key_value_38', next_step_tensors['past_key_value_38'].to_torch())
-            print('present_key_value_38', next_step_tensors['present_key_value_38'].to_torch())
-            print('past_key_value_39', next_step_tensors['past_key_value_39'].to_torch())
-            print('present_key_value_39', next_step_tensors['present_key_value_39'].to_torch())
-            print('host_past_key_value_lengths', next_step_tensors['host_past_key_value_lengths'].to_torch())
-            print('host_request_types', next_step_tensors['host_request_types'].to_torch())
-            print('sequence_length', next_step_tensors['sequence_length'].to_torch())
-            print('host_sink_token_length', next_step_tensors['host_sink_token_length'].to_torch())
-            print('host_max_attention_window_size_0', next_step_tensors['host_max_attention_window_size_0'].to_torch())
-            print('host_max_attention_window_size_1', next_step_tensors['host_max_attention_window_size_1'].to_torch())
-            print('host_max_attention_window_size_2', next_step_tensors['host_max_attention_window_size_2'].to_torch())
-            print('host_max_attention_window_size_3', next_step_tensors['host_max_attention_window_size_3'].to_torch())
-            print('host_max_attention_window_size_4', next_step_tensors['host_max_attention_window_size_4'].to_torch())
-            print('host_max_attention_window_size_5', next_step_tensors['host_max_attention_window_size_5'].to_torch())
-            print('host_max_attention_window_size_6', next_step_tensors['host_max_attention_window_size_6'].to_torch())
-            print('host_max_attention_window_size_7', next_step_tensors['host_max_attention_window_size_7'].to_torch())
-            print('host_max_attention_window_size_8', next_step_tensors['host_max_attention_window_size_8'].to_torch())
-            print('host_max_attention_window_size_9', next_step_tensors['host_max_attention_window_size_9'].to_torch())
-            print('host_max_attention_window_size_10', next_step_tensors['host_max_attention_window_size_10'].to_torch())
-            print('host_max_attention_window_size_11', next_step_tensors['host_max_attention_window_size_11'].to_torch())
-            print('host_max_attention_window_size_12', next_step_tensors['host_max_attention_window_size_12'].to_torch())
-            print('host_max_attention_window_size_13', next_step_tensors['host_max_attention_window_size_13'].to_torch())
-            print('host_max_attention_window_size_14', next_step_tensors['host_max_attention_window_size_14'].to_torch())
-            print('host_max_attention_window_size_15', next_step_tensors['host_max_attention_window_size_15'].to_torch())
-            print('host_max_attention_window_size_16', next_step_tensors['host_max_attention_window_size_16'].to_torch())
-            print('host_max_attention_window_size_17', next_step_tensors['host_max_attention_window_size_17'].to_torch())
-            print('host_max_attention_window_size_18', next_step_tensors['host_max_attention_window_size_18'].to_torch())
-            print('host_max_attention_window_size_19', next_step_tensors['host_max_attention_window_size_19'].to_torch())
-            print('host_max_attention_window_size_20', next_step_tensors['host_max_attention_window_size_20'].to_torch())
-            print('host_max_attention_window_size_21', next_step_tensors['host_max_attention_window_size_21'].to_torch())
-            print('host_max_attention_window_size_22', next_step_tensors['host_max_attention_window_size_22'].to_torch())
-            print('host_max_attention_window_size_23', next_step_tensors['host_max_attention_window_size_23'].to_torch())
-            print('host_max_attention_window_size_24', next_step_tensors['host_max_attention_window_size_24'].to_torch())
-            print('host_max_attention_window_size_25', next_step_tensors['host_max_attention_window_size_25'].to_torch())
-            print('host_max_attention_window_size_26', next_step_tensors['host_max_attention_window_size_26'].to_torch())
-            print('host_max_attention_window_size_27', next_step_tensors['host_max_attention_window_size_27'].to_torch())
-            print('host_max_attention_window_size_28', next_step_tensors['host_max_attention_window_size_28'].to_torch())
-            print('host_max_attention_window_size_29', next_step_tensors['host_max_attention_window_size_29'].to_torch())
-            print('host_max_attention_window_size_30', next_step_tensors['host_max_attention_window_size_30'].to_torch())
-            print('host_max_attention_window_size_31', next_step_tensors['host_max_attention_window_size_31'].to_torch())
-            print('host_max_attention_window_size_32', next_step_tensors['host_max_attention_window_size_32'].to_torch())
-            print('host_max_attention_window_size_33', next_step_tensors['host_max_attention_window_size_33'].to_torch())
-            print('host_max_attention_window_size_34', next_step_tensors['host_max_attention_window_size_34'].to_torch())
-            print('host_max_attention_window_size_35', next_step_tensors['host_max_attention_window_size_35'].to_torch())
-            print('host_max_attention_window_size_36', next_step_tensors['host_max_attention_window_size_36'].to_torch())
-            print('host_max_attention_window_size_37', next_step_tensors['host_max_attention_window_size_37'].to_torch())
-            print('host_max_attention_window_size_38', next_step_tensors['host_max_attention_window_size_38'].to_torch())
-            print('host_max_attention_window_size_39', next_step_tensors['host_max_attention_window_size_39'].to_torch())
-            print('medusa_packed_mask', next_step_tensors['medusa_packed_mask'].to_torch())
-            print('medusa_position_offsets', next_step_tensors['medusa_position_offsets'].to_torch())
-
-
         should_stop, next_step_tensors, tasks, context_lengths, host_context_lengths, attention_mask, logits, generation_logit, encoder_input_lengths, hidden_states_output = self.handle_per_step(
             cache_indirections, step, batch_size, max_context_length,
             beam_width, input_ids, hidden_states, scfg,
@@ -579,9 +444,12 @@ def decode_regular(self, small,
 
             # self.new_tokens = big_new_tokens
             # self.update_output_ids_by_offset(self.new_tokens, self.sequence_length_buffer)
-            self.sequence_length_buffer += draft_token_len + 1
+            if args.use_mds:
+                self.sequence_length_buffer += draft_token_len + 1
+            else:
+                self.sequence_length_buffer += 1
             ## for small
-            if not args.use_table_search:
+            if args.use_mds and not args.use_table_search:
                 new_embedding = bigmodel.model.embed_tokens(big_new_tokens[:, -1:])
                 input_embedding = torch.concat((input_embedding, new_embedding), 1)
         else:
@@ -594,21 +462,27 @@ def decode_regular(self, small,
             posterior_mask = (input_ids[:, 1:] == big_new_tokens[:, :-1]).int()
             accept_length = (torch.cumprod(posterior_mask, dim=1)).sum(dim=1)
             accept_length += 1
+            # accept_length = torch.Tensor([1]).to(torch.int32).cuda()
 
             # NOTE: self.sequence_length_buffer = num_past_kv_cache (accepted) + num_medusa_tokens + 1
             big_new_tokens = big_new_tokens[:, :accept_length]
             # NOTE: self.accept_lengths are the lengths of accepted tokens in the current step
             self.accept_lengths = accept_length
-            # if not args.use_table_search:
+            # if args.use_mds and not args.use_table_search:
                 # small.accept_lengths = accept_length
-            self.update_kv_cache_draft_token_location(batch_size, self.medusa_paths[0][:new_token_len], accept_length)
+            if args.use_mds or args.use_table_search:
+                self.update_kv_cache_draft_token_location(batch_size, self.medusa_paths[0][:new_token_len], accept_length)
+            else:
+                self.sequence_length_buffer += 1
+
             output_ids = torch.concat((output_ids, big_new_tokens), -1)
 
             ## for small
-            if not args.use_table_search:
+            if args.use_mds and not args.use_table_search:
                 hidden_states_output = hidden_states_output[:, :accept_length].clone()
                 input_embedding = torch.concat((input_embedding, bigmodel.model.embed_tokens(big_new_tokens[:, :accept_length])), 1)
 
+        # output_ids.item()
         end = time.time()
         if (step > 0):
             sp_time += end - start
@@ -618,10 +492,11 @@ def decode_regular(self, small,
         total_accept_length += accept_length
         current_len += accept_length.item()
 
+        # input_ids = torch.concat((input_ids, fake_draft_tensor[:, 1:(draft_token_len + 1)]), dim=-1)
         if args.use_table_search:
             phrase_tokens, new_token_len, status = choices.get_phrase_token(output_ids)
             input_ids = phrase_tokens
-        else:
+        elif args.use_mds:
             draft_tokens = big_new_tokens[:, -1:]
             ea_logits, _, _ = eagle_model.ea_layer.topK_genrate(
                 hidden_states_output,
@@ -632,26 +507,32 @@ def decode_regular(self, small,
             input_ids = torch.concat((draft_tokens, ea_logits[:, 0].reshape(draft_tokens.shape[0], draft_token_len)), dim=-1).to(torch.int32)
             new_token_len = draft_token_len + 1
             # print("draft_tokens", draft_tokens)
+        else:
+            input_ids = big_new_tokens[:, -1:]
         # print("猜 tokens:", input_ids[0])
         # print("猜:", tokenizer.decode(input_ids[0]))
 
         next_context = self.runtime.context_1 if step % 2 else self.runtime.context_0
         self.runtime._set_tensor(next_context, "input_ids", input_ids.squeeze(0))
-        next_step_tensors['host_past_key_value_lengths'].to_torch().copy_(self.sequence_length_buffer)
+        # next_step_tensors['host_past_key_value_lengths'].to_torch().copy_(self.sequence_length_buffer)
 
         self.new_token_num = new_token_len
         # print("self.new_token_num", self.new_token_num)
 
         end = time.time()
         if (step > 0):
-            total_time += end - start
+            total_generate_time += end - start
+        else:
+            prefill = end - start
         # if step == 3:
             # exit()
         should_stop = (self.end_ids in output_ids[0, -1])
 
         if should_stop is not None and should_stop:
             profile_fn(benchmark_profiler, generation_phase_step_count)
-            self.sequence_length_buffer = self.sequence_length_buffer + self.accept_lengths - self.num_medusa_tokens
+            if args.use_mds:
+                self.sequence_length_buffer = self.sequence_length_buffer - self.num_medusa_tokens
+                
             # if self.is_medusa_mode:
                 # # just hack away for now
                 # final_output_ids = self.output_ids.clone().unsqueeze(1)
@@ -660,9 +541,13 @@ def decode_regular(self, small,
                     # context_lengths, batch_size, beam_width, scfg)
             final_output_ids = output_ids
 
-            print("self.total_time", self.total_time)
-            print("total_time", total_time)
-            print("sp_time", sp_time)
+            print("self.total_time", self.total_generate_time)
+            print("prefill", prefill)
+            print("self.lm_head_time", self.lm_head_time)
+            print("big_time", sp_time)
+            print("small time", total_generate_time - sp_time)
+            print("total_time", total_generate_time)
+
             if self.mapping.is_first_pp_rank():
                 if return_dict:
                     return get_outputs_dict(final_output_ids, total_accept_length, step + 1)
@@ -1074,7 +959,7 @@ with torch.inference_mode():
         end = time.time()
 
         # print(outputs)
-        new_token = outputs['sequence_lengths'] - input_token_len + 2
+        new_token = outputs['sequence_lengths'] - input_token_len
         generate_steps = outputs['step']
         avg_acc_len = outputs['total_accept_length'] * 1. / generate_steps
         # generation_logits = outputs['generation_logits']
