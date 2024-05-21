@@ -393,6 +393,7 @@ def decode_regular(self, small,
 
     self.total_time = 0.
     total_time = 0.
+    sp_time = 0.
     eagle_model.ea_layer.reset_kv()
 
     next_step_tensors = None
@@ -593,16 +594,13 @@ def decode_regular(self, small,
             posterior_mask = (input_ids[:, 1:] == big_new_tokens[:, :-1]).int()
             accept_length = (torch.cumprod(posterior_mask, dim=1)).sum(dim=1)
             accept_length += 1
-            # accept_length = torch.Tensor([1]).to(torch.int32).cuda()
-            if not args.use_table_search:
-                small.accept_lengths = accept_length
 
             # NOTE: self.sequence_length_buffer = num_past_kv_cache (accepted) + num_medusa_tokens + 1
             big_new_tokens = big_new_tokens[:, :accept_length]
-            # self.new_tokens = big_new_tokens
-            # self.update_output_ids_by_offset(self.new_tokens, self.sequence_length_buffer - draft_token_len)
             # NOTE: self.accept_lengths are the lengths of accepted tokens in the current step
             self.accept_lengths = accept_length
+            # if not args.use_table_search:
+                # small.accept_lengths = accept_length
             self.update_kv_cache_draft_token_location(batch_size, self.medusa_paths[0][:new_token_len], accept_length)
             output_ids = torch.concat((output_ids, big_new_tokens), -1)
 
@@ -611,6 +609,9 @@ def decode_regular(self, small,
                 hidden_states_output = hidden_states_output[:, :accept_length].clone()
                 input_embedding = torch.concat((input_embedding, bigmodel.model.embed_tokens(big_new_tokens[:, :accept_length])), 1)
 
+        end = time.time()
+        if (step > 0):
+            sp_time += end - start
 
         # print("目前: tokens:", output_ids[0])
         # print("目前:", tokenizer.decode(output_ids[0]))
@@ -661,6 +662,7 @@ def decode_regular(self, small,
 
             print("self.total_time", self.total_time)
             print("total_time", total_time)
+            print("sp_time", sp_time)
             if self.mapping.is_first_pp_rank():
                 if return_dict:
                     return get_outputs_dict(final_output_ids, total_accept_length, step + 1)
@@ -856,29 +858,29 @@ def decode(self, small,
                 self.num_heads_kv, self.head_size, kv_cache_type,
                 past_key_value_list)
 
-        if small.quant_mode.has_kv_cache_quant():
-            # Since torch does not support fp8 now, using int8 here.
-            kv_cache_type = torch.int8
-        else:
-            kv_cache_type = small.dtype if small.paged_kv_cache else small._tensor_dtype(
-                f'present_key_value_{small.first_layer}')
-        small.history_max_seq_length = [max_context_length]
-        small.kv_cache_updater = KVCacheUpdater()
-        assert not small.cross_attention
-        assert small.use_gpt_attention_plugin
+        # if small.quant_mode.has_kv_cache_quant():
+            # # Since torch does not support fp8 now, using int8 here.
+            # kv_cache_type = torch.int8
+        # else:
+            # kv_cache_type = small.dtype if small.paged_kv_cache else small._tensor_dtype(
+                # f'present_key_value_{small.first_layer}')
+        # small.history_max_seq_length = [max_context_length]
+        # small.kv_cache_updater = KVCacheUpdater()
+        # assert not small.cross_attention
+        # assert small.use_gpt_attention_plugin
 
-        if small.paged_kv_cache:
-            small.kv_cache_updater.init_paged_kv_cache(
-                small.num_heads_kv, small.head_size, kv_cache_type,
-                small.kv_cache_manager)
-        else:
-            past_key_value_list = [
-                small.buffer[f'present_key_value_{i}']
-                for i in range(small.first_layer, small.last_layer)
-            ]
-            small.kv_cache_updater.init_linear_kv_cache(
-                small.num_heads_kv, small.head_size, kv_cache_type,
-                past_key_value_list)
+        # if small.paged_kv_cache:
+            # small.kv_cache_updater.init_paged_kv_cache(
+                # small.num_heads_kv, small.head_size, kv_cache_type,
+                # small.kv_cache_manager)
+        # else:
+            # past_key_value_list = [
+                # small.buffer[f'present_key_value_{i}']
+                # for i in range(small.first_layer, small.last_layer)
+            # ]
+            # small.kv_cache_updater.init_linear_kv_cache(
+                # small.num_heads_kv, small.head_size, kv_cache_type,
+                # past_key_value_list)
 
     # # start context phase
     # if streaming:
@@ -951,16 +953,16 @@ def generate(self, small_runner,
         lora_uids=lora_uids,
         medusa_choices=medusa_choices)
 
-    small_runner.session.setup(
-        batch_size=batch_size,
-        max_context_length=input_lengths.max().item(),
-        max_new_tokens=sampling_config.max_new_tokens,
-        beam_width=sampling_config.num_beams,
-        max_attention_window_size=sampling_config.max_attention_window_size,
-        sink_token_length=sampling_config.sink_token_length,
-        lora_manager=self.lora_manager,
-        lora_uids=lora_uids,
-        medusa_choices=None)
+    # small_runner.session.setup(
+        # batch_size=batch_size,
+        # max_context_length=input_lengths.max().item(),
+        # max_new_tokens=sampling_config.max_new_tokens,
+        # beam_width=sampling_config.num_beams,
+        # max_attention_window_size=sampling_config.max_attention_window_size,
+        # sink_token_length=sampling_config.sink_token_length,
+        # lora_manager=self.lora_manager,
+        # lora_uids=lora_uids,
+        # medusa_choices=None)
 
     batch_input_ids = batch_input_ids.cuda()
     input_lengths = input_lengths.cuda()
