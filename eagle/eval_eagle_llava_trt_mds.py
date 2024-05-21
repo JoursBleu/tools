@@ -27,6 +27,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument('--base_model_dir', type=str, default=None)
     parser.add_argument('--tokenizer', type=str, default=None)
+    parser.add_argument('--eagle_small_model_dir', type=str, default="/mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/0503-small")
     parser.add_argument('--small_model_dir', type=str, default="/mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/0503-small")
     parser.add_argument('--big_engine_dir', type=str, default="/mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02-trt")
     parser.add_argument('--small_engine_dir', type=str, default="/mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/0503-engine")
@@ -47,6 +48,13 @@ def parse_arguments():
 
 args = parse_arguments()
 
+eagle_model = EaModel.from_pretrained(
+    base_model_path=args.base_model_dir,
+    ea_model_path=args.eagle_small_model_dir,
+    torch_dtype=torch.float16,
+    load_in_4bit=False,
+).eval().cuda()
+
 small_model = AutoModelForCausalLM.from_pretrained(args.small_model_dir, device_map="cuda").eval().to(torch.half).cuda()
 
 print("loading tokenizer")
@@ -56,10 +64,11 @@ if tokenizer.pad_token_id is None:
 pad_id = tokenizer.pad_token_id
 
 print("loading model")
-medusa_choices=[[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]
+draft_token_len = 10
+medusa_choices=[[0] * draft_token_len]
+# medusa_choices=[[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]
 # medusa_choices=[[0, 0, 0, 0, 0,]]
 # medusa_choices=[[0, 0,]]
-draft_token_len = len(medusa_choices[0])
 prompt_table_path = "/root/.cache/prompt_table.npy"
 big_runner = ModelRunner.from_dir(
     engine_dir=args.big_engine_dir,
@@ -168,7 +177,7 @@ phrases_lists = [
     106772: [106772, 26, 101178, 31905, 25, 42192, 26, 56278, 30767, 111363, 7259], # '白天;道路类型:无;备选车道:['
     108036: [108036, 26, 101178, 31905, 25, 42192, 26, 56278, 30767, 111363, 7259], # '夜晚;道路类型:无;备选车道:['
 },
-# doulu
+# daolu
 {},
 # beixuan
 {
@@ -228,7 +237,7 @@ class Status(IntEnum):
     start = 0
     changjing = 1
     shijian = 2
-    doulu = 3
+    daolu = 3
     beixuan = 4
     ziche = 5
     wenben = 6
@@ -260,7 +269,7 @@ class Choices:
             elif "备选车道" in out_str:
                 self.status = Status.beixuan
             # elif "道路类型" in out_str:
-                # status = Status.doulu
+                # status = Status.daolu
             elif "时间" in out_str:
                 self.status = Status.shijian
             elif "场景" in out_str:
@@ -283,10 +292,11 @@ class Choices:
                 print("new_token_len", new_token_len)
 
         if new_token_len < draft_token_len + 1:
-            # print("base new_token:", new_token)
             new_token = torch.concat((new_token, fake_draft_tensor[:, new_token_len:(draft_token_len + 1)]), dim=-1)
             new_token_len = draft_token_len + 1
-            # print("fixed new_token:", new_token)
+        # if new_token_len < 2:
+            # new_token = torch.concat((new_token, fake_draft_tensor[:, new_token_len:2]), dim=-1)
+            # new_token_len = 2
         elif new_token_len > (draft_token_len + 1):
             new_token = new_token[:, :(draft_token_len + 1)]
             new_token_len = (draft_token_len + 1)
@@ -387,7 +397,7 @@ def decode_regular(self, small,
     next_step_tensors = None
     next_step_tensors_s = None
     big_out_hidden_states = None
-    input_embedding = hidden_states.clone()[:, 1:]
+    input_embedding = hidden_states.clone()
     context_lengths_s = context_lengths.clone()
     host_context_lengths_s = context_lengths_s.cpu()
     small_sequence_lengths = sequence_lengths.clone()
@@ -396,6 +406,8 @@ def decode_regular(self, small,
     accept_length = 0
     # self.num_eagle_tokens = 1
     # last_token_ids = torch.cumsum(context_lengths.clone().detach(), dim=0).int()
+    current_len = host_context_lengths.item() - 1
+    new_token_len = draft_token_len + 1
     for step in range(0, self.max_new_tokens):
         start = time.time()
         # print("big step:", step)
@@ -430,9 +442,9 @@ def decode_regular(self, small,
             # print("big_new_phrase", tokenizer.decode(big_new_tokens[0]))
 
             ## for small
-            new_embedding = bigmodel.model.embed_tokens(big_new_tokens[:, -1:])
-            input_embedding = torch.concat((input_embedding, new_embedding), 1)
-            small_hidden_states = torch.concat((input_embedding, hidden_states_output), -1)
+            if not args.use_table_search:
+                new_embedding = bigmodel.model.embed_tokens(big_new_tokens[:, -1:])
+                input_embedding = torch.concat((input_embedding, new_embedding), 1)
         else:
             generation_phase_step_count = generation_phase_step_count + 1
 
@@ -445,60 +457,73 @@ def decode_regular(self, small,
             accept_length += 1
             # accept_length = torch.Tensor([1]).to(torch.int32).cuda()
             self.accept_lengths = accept_length
-            small.accept_lengths = accept_length
+            if not args.use_table_search:
+                small.accept_lengths = accept_length
 
             # big_new_tokens = big_new_tokens[:, :accept_length]
             big_new_tokens = big_new_tokens[:, :accept_length]
             self.update_kv_cache_draft_token_location(batch_size, self.medusa_paths[0][:new_token_len], accept_length)
-
-            ## for small
-            hidden_states_output = hidden_states_output[:,accept_length-1:accept_length]
-            new_embedding = bigmodel.model.embed_tokens(big_new_tokens[:, -1:])
-            small_hidden_states = torch.concat((hidden_states_output, new_embedding), -1)
-            small.update_kv_cache_draft_token_location(batch_size, self.medusa_paths[0][:new_token_len], accept_length)
-
             output_ids = torch.concat((output_ids, big_new_tokens), -1)
 
+            ## for small
+            if not args.use_table_search:
+                hidden_states_output = hidden_states_output[:, :accept_length]
+                input_embedding = torch.concat((input_embedding, bigmodel.model.embed_tokens(big_new_tokens[:, :accept_length])), 1)
+
+
+        # print("目前: tokens:", output_ids[0])
         # print("目前:", tokenizer.decode(output_ids[0]))
-        phrase_tokens, new_token_len, status = choices.get_phrase_token(output_ids)
         total_accept_length += accept_length
+        current_len += accept_length.item()
 
-        # small_step = step
-        # small.sequence_length_buffer = self.sequence_length_buffer
-        # draft_tokens = [big_new_tokens[:, -1:]]
-        # small_hidden_states = small_model.fc(small_hidden_states).squeeze(0)
-        # print("small_hidden_states", small_hidden_states.shape)
-        # print("draft_tokens", draft_tokens)
-        # for idx in range(draft_token_len):
-            # print("small: input small.sequence_length_buffer", small.sequence_length_buffer)
-            # _, next_step_tensors_s, tasks_s, context_lengths_s, host_context_lengths_s, _, _, generation_logit_s, encoder_input_lengths_s, hidden_states_output_s = small.handle_per_step(
-                # small_cache_indirections, small_step+idx, batch_size, max_context_length,
-                # beam_width, input_ids, small_hidden_states, scfg,
-                # None, None, None, tasks_s, context_lengths_s,
-                # host_context_lengths_s, None, cross_attention_mask,
-                # None, ite, sequence_limit_lengths,
-                # small_sequence_lengths, next_step_tensors_s, stop_words_list,
-                # bad_words_list, no_repeat_ngram_size, encoder_output,
-                # encoder_input_lengths_s, stopping_criteria, logits_processor,
-                # **kwargs)
-            # print("input_ids", small.new_tokens)
-            # draft_tokens.append(small.new_tokens)
-            # small.sequence_length_buffer += 1
-            # self.stream.synchronize()
-            # sys.stdout.flush()
-
-        input_ids = phrase_tokens
-        # input_ids = torch.concat(draft_tokens, dim=-1)
+        if args.use_table_search:
+            phrase_tokens, new_token_len, status = choices.get_phrase_token(output_ids)
+            input_ids = phrase_tokens
+        else:
+            draft_tokens = big_new_tokens[:, -1:]
+            ea_logits, _, _ = eagle_model.ea_layer.topK_genrate(
+                hidden_states_output,
+                input_embedding,
+                head=bigmodel.lm_head,
+                logits_processor=None
+            )
+            input_ids = torch.concat((draft_tokens, ea_logits[:, 0].reshape(draft_tokens.shape[0], draft_token_len)), dim=-1)
+            new_token_len = draft_token_len + 1
+            # print("draft_tokens", draft_tokens)
         # print("猜 tokens:", input_ids[0])
         # print("猜:", tokenizer.decode(input_ids[0]))
+
         next_context = self.runtime.context_1 if step % 2 else self.runtime.context_0
         self.runtime._set_tensor(next_context, "input_ids", input_ids.squeeze(0))
-        torch.cuda.synchronize()
-        sys.stdout.flush()
+
+        # position_ids = torch.arange(
+                        # current_len,
+                        # current_len + new_token_len,
+                        # dtype=torch.int32,
+                        # device='cuda'
+                       # )
+        # self.runtime._set_tensor(next_context, "position_ids", position_ids)
+        # last_token_ids = self.sequence_length_buffer
+        # self.runtime._set_tensor(next_context, "last_token_ids", last_token_ids)
+
+        # medusa_packed_mask_ = self.buffer['medusa_packed_mask'][:, :new_token_len].clone()
+        # medusa_position_offsets_ = self.buffer['medusa_position_offsets'][:, :new_token_len].clone()
+        # self.runtime._set_tensor(
+            # next_context, 'medusa_packed_mask', medusa_packed_mask_)
+        # self.runtime._set_tensor(
+            # next_context, 'medusa_position_offsets', medusa_position_offsets_)
+        # print("medusa_packed_mask_", medusa_packed_mask_)
+        # print("medusa_position_offsets_", medusa_position_offsets_)
+
+
+        # torch.cuda.synchronize()
+        # sys.stdout.flush()
 
         self.new_token_num = new_token_len
         # print("self.new_token_num", self.new_token_num)
 
+        # if step == 3:
+            # exit()
         should_stop = (self.end_ids in output_ids[0, -1])
 
         if should_stop is not None and should_stop:
