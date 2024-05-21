@@ -1,5 +1,11 @@
 export PYTHONPATH=/lpai/volumes/cloudmodel-muses/lt/EAGLE:/lpai/volumes/cloudmodel-muses/lt/transformers/src:/lpai/volumes/cloudmodel-muses/lt/TensorRT-LLM-v080:/lpai/volumes/cloudmodel-muses/lt/llm_factory
 
+
+
+
+
+
+
 # base without eagle
 
 cmd:
@@ -92,12 +98,6 @@ cmd:
 
 CUDA_VISIBLE_DEVICES=0 python3 eval_eagle_llava_trt_mds.py --eagle_small_model_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/model_19 --base_model_dir /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02/ --tokenizer /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02 --small_engine_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/0503-engine --big_engine_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02-trt-mds/ --max_input_len 64 --max_new_tokens 512 --benchmark --batch_size 1 --benchmark_steps 100 --benchmark_dataset_json /mnt/volumes/cloudmodel-muses/lt/data/Damo/dm_v0.1.3_0/navi_llava_test.json --use_sp --use_table_search |tee eee.log
 
-		Step 100 : 0.2773020267486572 s
-		Outputs: [' 场景:[泥泞路];时间:无;道路类型:无;备选车道:[无,无,无];自车车道:无;文本:车辆未处于任何车道中;车辆将在前方泥泞路面上慢速行驶,避免颠簸. ']
-		outputs.numel(): 59
-		Total new token: tensor([[60]], device='cuda:0', dtype=torch.int32)
-		Avg acc len: tensor([2.1852], device='cuda:0')
-		avg_acc_lens: tensor([2.5968], device='cuda:0')
 		Total steps: 100
 		Batch size: 1
 		Input len: 819.4343434343434
@@ -109,4 +109,24 @@ CUDA_VISIBLE_DEVICES=0 python3 eval_eagle_llava_trt_mds.py --eagle_small_model_d
 		benchmark_steps: 99
 		BASE TPS: tensor([[2.5139e+08]], device='cuda:0')
 		TPS: tensor([[234.2530]], device='cuda:0')
+
+
+
+# trt sp with eagle
+
+cmd:
+
+CUDA_VISIBLE_DEVICES=0 python3 eval_eagle_llava_trt_mds.py --eagle_small_model_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/model_19 --base_model_dir /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02/ --tokenizer /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02 --small_engine_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/0503-engine --big_engine_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02-trt-mds/ --max_input_len 64 --max_new_tokens 512 --benchmark --batch_size 1 --benchmark_steps 100 --benchmark_dataset_json /mnt/volumes/cloudmodel-muses/lt/data/Damo/dm_v0.1.3_0/navi_llava_test.json --use_sp |tee eee.log
+
+		Total steps: 100
+		Batch size: 1
+		Input len: 819.4343434343434
+		Avg output len: tensor([[67.9192]], device='cuda:0')
+		Avg acc len: tensor([5.9471], device='cuda:0')
+		Avg tokens / step: tensor([6.9471], device='cuda:0')
+		Avg vit time: 0.009291824668344825
+		Avg total time: 0.2630866392694338
+		benchmark_steps: 99
+		BASE TPS: tensor([[1.8554e+08]], device='cuda:0')
+		TPS: tensor([[267.6146]], device='cuda:0')
 
