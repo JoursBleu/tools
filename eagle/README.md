@@ -1,6 +1,24 @@
 export PYTHONPATH=/lpai/volumes/cloudmodel-muses/lt/EAGLE:/lpai/volumes/cloudmodel-muses/lt/transformers/src:/lpai/volumes/cloudmodel-muses/lt/TensorRT-LLM-v080:/lpai/volumes/cloudmodel-muses/lt/llm_factory
 
 
+## convert small
+
+# convert eagle small ckpt to hf llama ckpt
+
+python3 /lpai/volumes/cloudmodel-muses/lt/tools/eagle/convert_weight.py --big_model_dir /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02 --small_model_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/model_19 --output_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/0503-small
+
+
+# convert hf llama ckpt to trtllm ckpt
+
+/lpai/volumes/cloudmodel-muses/lt/TensorRT-LLM/v0.8.0_0522.patch
+
+cd /lpai/volumes/cloudmodel-muses/lt/TensorRT-LLM/examples/llama
+
+python3 convert_checkpoint.py --model_dir /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/0503-small/ --output_dir /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/0503-trt
+
+# build trtllm engine
+
+trtllm-build --checkpoint_dir /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/0503-trt --output_dir /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/0503-engine/ --gemm_plugin float16 --paged_kv_cache disable --max_input_len 2048 --max_output_len 512 --max_num_tokens 2048 --max_batch_size 16
 
 
 
@@ -10,24 +28,24 @@ export PYTHONPATH=/lpai/volumes/cloudmodel-muses/lt/EAGLE:/lpai/volumes/cloudmod
 
 cmd:
 
-CUDA_VISIBLE_DEVICES=0 python3 eval_eagle_llava.py --base_model_dir /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02/ --tokenizer /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02 --max_input_len 64 --max_new_tokens 4610 --benchmark --batch_size 1 --benchmark_steps 100 --benchmark_dataset_json /mnt/volumes/cloudmodel-muses/lt/data/Damo/dm_v0.1.3_0/navi_llava_test.json --small_model_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/model_19
+CUDA_VISIBLE_DEVICES=0 python3 eval_eagle_llava.py --base_model_dir /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02/ --tokenizer /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02 --max_input_len 64 --max_new_tokens 512 --benchmark --batch_size 1 --benchmark_steps 100 --benchmark_dataset_json /mnt/volumes/cloudmodel-muses/lt/data/Damo/dm_v0.1.3_0/navi_llava_test.json --small_model_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/model_19
 
-Total steps: 100
-Batch size: 1
-Input len: 244.43434343434345
-Avg output len: 56.95959595959596
-Avg acc len: 0.0
-Avg token/step: 1.0
-Avg vit time: 0.009110910723907779
-benchmark_steps: 99
-BASE TPS: 215015275.05454546
-TPS: 33.956882150580725
+		Total steps: 100
+		Batch size: 1
+		Input len: 244.43434343434345
+		Avg output len: 56.95959595959596
+		Avg acc len: 0.0
+		Avg token/step: 1.0
+		Avg vit time: 0.009110910723907779
+		benchmark_steps: 99
+		BASE TPS: 215015275.05454546
+		TPS: 33.956882150580725
 
 # base eagle
 
 cmd:
 
-CUDA_VISIBLE_DEVICES=0 python3 eval_eagle_llava.py --base_model_dir /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02/ --tokenizer /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02 --max_input_len 64 --max_new_tokens 4610 --benchmark --batch_size 1 --benchmark_steps 100 --benchmark_dataset_json /mnt/volumes/cloudmodel-muses/lt/data/Damo/dm_v0.1.3_0/navi_llava_test.json --use_sp --small_model_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/model_19
+CUDA_VISIBLE_DEVICES=0 python3 eval_eagle_llava.py --base_model_dir /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02/ --tokenizer /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02 --max_input_len 64 --max_new_tokens 512 --benchmark --batch_size 1 --benchmark_steps 100 --benchmark_dataset_json /mnt/volumes/cloudmodel-muses/lt/data/Damo/dm_v0.1.3_0/navi_llava_test.json --use_sp --small_model_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/model_19
 
 		Total steps: 100
 		Batch size: 1
@@ -85,11 +103,23 @@ CUDA_VISIBLE_DEVICES=0 python3 eval_eagle_llava_trt_context4gen.py --base_model_
 		TPS: tensor([[290.8713]], device='cuda:0')
 
 
-# trt context4gen without sp
+# trt context4gen with sp & table-search
 
 cmd:
 
-CUDA_VISIBLE_DEVICES=0 python3 eval_eagle_llava_trt_mds_context.py --base_model_dir /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02/ --tokenizer /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02 --small_engine_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/0503-engine --big_engine_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02-trt-mds/ --max_input_len 64 --max_new_tokens 512 --benchmark --batch_size 1 --benchmark_steps 100 --benchmark_dataset_json /mnt/volumes/cloudmodel-muses/lt/data/Damo/dm_v0.1.3_0/navi_llava_test.json --use_sp|tee eee.log
+CUDA_VISIBLE_DEVICES=0 python3 eval_eagle_llava_trt_context_org_small.py --eagle_small_model_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/model_19 --base_model_dir /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02/ --tokenizer /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02 --small_engine_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/0503-engine --big_engine_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02-trt-context/ --max_input_len 64 --max_new_tokens 512 --benchmark --batch_size 1 --benchmark_steps 100 --benchmark_dataset_json /mnt/volumes/cloudmodel-muses/lt/data/Damo/dm_v0.1.3_0/navi_llava_test.json --use_sp --use_table_search |tee eee.log
+
+		Total steps: 100
+		Batch size: 1
+		Input len: 819.4343434343434
+		Avg output len: tensor([[56.5758]], device='cuda:0')
+		Avg acc len: tensor([5.3536], device='cuda:0')
+		Avg tokens / step: tensor([6.3536], device='cuda:0')
+		Avg vit time: 0.010370225617379852
+		Avg total time: 0.1946053095538207
+		benchmark_steps: 99
+		BASE TPS: tensor([[1.4501e+08]], device='cuda:0')
+		TPS: tensor([[307.0846]], device='cuda:0')
 
 
 # trt base
@@ -137,15 +167,16 @@ cmd:
 
 CUDA_VISIBLE_DEVICES=0 python3 eval_eagle_llava_trt_mds.py --eagle_small_model_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/model_19 --base_model_dir /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02/ --tokenizer /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02 --small_engine_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/0503-engine --big_engine_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02-trt-mds/ --max_input_len 64 --max_new_tokens 512 --benchmark --batch_size 1 --benchmark_steps 100 --benchmark_dataset_json /mnt/volumes/cloudmodel-muses/lt/data/Damo/dm_v0.1.3_0/navi_llava_test.json --use_sp --use_mds |tee eee.log
 
+
 		Total steps: 100
 		Batch size: 1
 		Input len: 819.4343434343434
-		Avg output len: tensor([[67.9192]], device='cuda:0')
+		Avg output len: tensor([[57.7273]], device='cuda:0')
 		Avg acc len: tensor([5.9471], device='cuda:0')
 		Avg tokens / step: tensor([6.9471], device='cuda:0')
-		Avg vit time: 0.009291824668344825
-		Avg total time: 0.2630866392694338
+		Avg vit time: 0.00940054835695209
+		Avg total time: 0.1861219382045245
 		benchmark_steps: 99
-		BASE TPS: tensor([[1.8554e+08]], device='cuda:0')
-		TPS: tensor([[267.6146]], device='cuda:0')
+		BASE TPS: tensor([[2.5775e+08]], device='cuda:0')
+		TPS: tensor([[326.6570]], device='cuda:0')
 
