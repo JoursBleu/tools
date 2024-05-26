@@ -57,7 +57,7 @@ with open(args.benchmark_dataset_json, 'r') as f:
     questions = json.load(f)
     # questions = questions[57000:]
 
-tokenizer, bigmodel, image_processor, context_len = load_pretrained_model(
+tokenizer, bigmodel, image_processor, _, context_len = load_pretrained_model(
             args.base_model_dir, model_base="llava_qwen", device_map="cuda", load_in_8bit=False, load_in_4bit=False)
 dataset = create_data_loader(
     questions,

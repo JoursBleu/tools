@@ -83,7 +83,7 @@ small_runner = ModelRunner.from_dir(
 with open(args.benchmark_dataset_json, 'r') as f:
     questions = json.load(f)
 
-tokenizer, bigmodel, image_processor, context_len = load_pretrained_model(
+tokenizer, bigmodel, image_processor, _, context_len = load_pretrained_model(
             args.base_model_dir, model_base="llava_qwen", device_map="cuda", load_in_8bit=False, load_in_4bit=False)
 dataset = create_data_loader(
     questions,
@@ -232,6 +232,9 @@ for phrases_list in phrases_lists:
     for key in phrases_list:
         phrases_list[key] = (torch.Tensor(phrases_list[key]).to(torch.int32).unsqueeze(0).cuda(), len(phrases_list[key]))
 
+prefix = torch.Tensor([53599, 118, 85254]).to(torch.int32).reshape([1, 3]).cuda()
+prefix_len = 3
+
 class Status(IntEnum):
     start = 0
     changjing = 1
@@ -299,7 +302,11 @@ count = 0
 avg_acc_len = 0
 total_input_len = 0
 total_base_time = 0.
+total_generate_steps = 0.
 total_vit_time = 0.
+acc_lens = dict()
+for i in range(draft_token_len+1):
+    acc_lens[i] = 0
 
 def decode_regular(self, small,
                    use_sp: bool,
@@ -331,6 +338,7 @@ def decode_regular(self, small,
                    cross_attention_mask: torch.Tensor = None,
                    **kwargs):
     assert(batch_size == 1)
+    global max_acc_len
     kv_cache_block_pointers = []
     host_kv_cache_block_pointers = []
     attention_mask = None
@@ -342,7 +350,7 @@ def decode_regular(self, small,
     small.fc = small_model.fc
     small.medusa_paths = self.medusa_paths
     choices = Choices()
-    # output_ids = [get_prefix()]
+    output_ids = prefix
     # input_ids = torch.concat((input_ids.cuda(), get_prefix().squeeze(0)), dim=-1)
     status = 0
     self.phrase_len = 0
@@ -423,10 +431,9 @@ def decode_regular(self, small,
             big_new_tokens = torch.argmax(generation_logit, dim=-1).to(torch.int32)
             accept_length = torch.Tensor([1]).to(torch.int32).cuda()
             context_lengths += 1
-            output_ids = big_new_tokens
             # self.sequence_length_buffer += draft_token_len + 1
             ## for small
-            new_embedding = bigmodel.model.embed_tokens(big_new_tokens[:, -1:])
+            new_embedding = bigmodel.model.embed_tokens(big_new_tokens)
             input_embedding = torch.concat((input_embedding[:, 1:], new_embedding), 1)
             total_hidden_states = hidden_states_output
         else:
@@ -444,7 +451,7 @@ def decode_regular(self, small,
             # if accept_length > 0:
                 # self.update_kv_cache_draft_token_location(batch_size, [0], accept_length)
             self.sequence_length_buffer += (accept_length - new_token_len)
-            output_ids = torch.concat((output_ids, big_new_tokens), -1)
+            acc_lens[accept_length.item()-1] += 1
 
             ## for small
             input_embedding = torch.concat((input_embedding, bigmodel.model.embed_tokens(big_new_tokens[:, :accept_length])), 1)
@@ -453,6 +460,7 @@ def decode_regular(self, small,
             else:
                 total_hidden_states = hidden_states_output[:, :accept_length]
 
+        output_ids = torch.concat((output_ids, big_new_tokens), -1)
         end = time.time()
         if (step > 0):
             sp_time += end - start
@@ -463,7 +471,9 @@ def decode_regular(self, small,
         # print("目前:", output_ids[0])
         # print("目前:", tokenizer.decode(output_ids[0]))
 
-        should_stop = (self.end_ids in output_ids[0, -1])
+        # 108704 is "文本"
+        # should_stop = (self.end_ids in output_ids[0]) or (108704 in output_ids[0])
+        should_stop = (self.end_ids in output_ids[0])
         if should_stop is not None and should_stop:
             profile_fn(benchmark_profiler, generation_phase_step_count)
             print("self.total_time", self.total_generate_time)
@@ -486,10 +496,12 @@ def decode_regular(self, small,
                 head=self.lm_head,
                 logits_processor=None,
                 max_length=draft_token_len,
+                end_ids=self.end_ids,
             )
-            input_ids = torch.concat((input_ids, ea_logits.reshape(input_ids.shape[0], draft_token_len)), dim=-1).to(torch.int32)
-            new_token_len = draft_token_len + 1
-            eagle_model.ea_layer.revert_kv(draft_token_len-1)
+            # print("ea_logits", ea_logits.shape)
+            input_ids = torch.concat((input_ids, ea_logits.unsqueeze(0)), dim=-1).to(torch.int32)
+            new_token_len = input_ids.shape[1]
+            eagle_model.ea_layer.revert_kv(new_token_len-2)
             total_hidden_states = None
         # print("猜 tokens:", input_ids[0])
         # print("猜:", tokenizer.decode(input_ids[0]))
@@ -886,10 +898,10 @@ with torch.inference_mode():
     for idx, data in enumerate(dataset):
         (input_ids, image_tensor, image_sizes, prompt) = data
         print("prompt:", prompt)
-        print("input_ids:", input_ids)
+        # print("input_ids:", input_ids)
         start = time.time()
         input_ids = input_ids.to(device='cuda', non_blocking=True)
-        # input_ids = torch.concat((input_ids.cuda(), get_prefix()), dim=-1)
+        input_ids = torch.concat((input_ids.cuda(), prefix), dim=-1)
 
         vit_start = time.time()
         position_ids=None
@@ -912,7 +924,7 @@ with torch.inference_mode():
             image_sizes=image_sizes
         )
         vit_end = time.time()
-        print("input_embedding:", input_embedding)
+        # print("input_embedding:", input_embedding)
 
         base_start = time.time()
         # output_ids = bigmodel.generate(
@@ -955,7 +967,7 @@ with torch.inference_mode():
         end = time.time()
 
         # print(outputs)
-        new_token = outputs['sequence_lengths'] - input_token_len
+        new_token = outputs['sequence_lengths'] - input_token_len + prefix_len
         generate_steps = outputs['step']
         avg_acc_len = outputs['total_accept_length'] * 1. / generate_steps
         # generation_logits = outputs['generation_logits']
@@ -980,10 +992,12 @@ with torch.inference_mode():
             total_input_len += input_token_len
             total_base_time += (base_end - base_start)
             total_vit_time += (vit_end - vit_start)
+            total_generate_steps += generate_steps
             print("avg_acc_lens:", avg_acc_lens / (idx+1))
         if (idx == args.benchmark_steps):
             break
 print("Total steps:", args.benchmark_steps)
+print("Avg generate steps:", total_generate_steps / count)
 print("Batch size:", args.batch_size)
 print("Input len:", total_input_len / count)
 print("Avg output len:", total_token / count)
@@ -994,4 +1008,6 @@ print("Avg total time:", (total_vit_time + total_time) / count)
 print("benchmark_steps:", count)
 print("BASE TPS:", total_token / total_base_time)
 print("TPS:", total_token / total_time)
+print("acc_lens:", acc_lens)
+
 

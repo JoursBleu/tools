@@ -65,7 +65,7 @@ if tokenizer.pad_token_id is None:
 pad_id = tokenizer.pad_token_id
 
 print("loading model")
-draft_token_len = 2
+draft_token_len = 10
 medusa_choices = [[0] * draft_token_len] if args.use_mds else None
 # medusa_choices=[[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]
 # medusa_choices=[[0, 0, 0, 0, 0,]]
@@ -486,8 +486,8 @@ def decode_regular(self, small,
         if (step > 0):
             sp_time += end - start
 
-        # print("目前: tokens:", output_ids[0])
-        # print("目前:", tokenizer.decode(output_ids[0]))
+        print("目前: tokens:", output_ids[0])
+        print("目前:", tokenizer.decode(output_ids[0]))
         total_accept_length += accept_length
         current_len += accept_length.item()
         should_stop = (small.end_ids in output_ids[0, -1])
@@ -583,41 +583,14 @@ def decode_regular(self, small,
                     # small.new_tokens = next_token.reshape([1,1])
                     # past_key_value = next_step_tensors_s['past_key_value_0'].to_torch()
                     # big_past_key_value = next_step_tensors['past_key_value_0'].to_torch()
-
-                # print("big context_lengths", next_step_tensors['context_lengths'].to_torch())
-                # print("big cache_indirection", next_step_tensors['cache_indirection'].to_torch())
-                # print("big last_token_ids", next_step_tensors['last_token_ids'].to_torch())
-                # print("big hidden_states_output", next_step_tensors['hidden_states_output'].to_torch())
-                # print("big host_context_lengths", next_step_tensors['host_context_lengths'].to_torch())
-                # print("big position_ids", next_step_tensors['position_ids'].to_torch())
-                # print("big host_past_key_value_lengths", next_step_tensors['host_past_key_value_lengths'].to_torch())
-                # print("big host_request_types", next_step_tensors['host_request_types'].to_torch())
-                # print("big sequence_length", next_step_tensors['sequence_length'].to_torch())
-                # print("big host_sink_token_length", next_step_tensors['host_sink_token_length'].to_torch())
-                # print("big host_max_attention_window_size_0", next_step_tensors['host_max_attention_window_size_0'].to_torch())
-                # print("next_step_tensors_s", next_step_tensors_s)
-                # print("context_lengths", next_step_tensors_s['context_lengths'].to_torch())
-                # print("cache_indirection", next_step_tensors_s['cache_indirection'].to_torch())
-                # print("last_token_ids", next_step_tensors_s['last_token_ids'].to_torch())
-                # print("hidden_states_output", next_step_tensors_s['hidden_states_output'].to_torch())
-                # print("hidden_states_input", next_step_tensors_s['hidden_states_input'].to_torch())
-                # print("input_ids", next_step_tensors_s['input_ids'].to_torch())
-                # print("host_context_lengths", next_step_tensors_s['host_context_lengths'].to_torch())
-                # print("position_ids", next_step_tensors_s['position_ids'].to_torch())
-                # print("host_past_key_value_lengths", next_step_tensors_s['host_past_key_value_lengths'].to_torch())
-                # print("host_request_types", next_step_tensors_s['host_request_types'].to_torch())
-                # print("sequence_length", next_step_tensors_s['sequence_length'].to_torch())
-                # print("host_sink_token_length", next_step_tensors_s['host_sink_token_length'].to_torch())
-                # print("host_max_attention_window_size_0", next_step_tensors_s['host_max_attention_window_size_0'].to_torch())
-                # exit()
                 small.sequence_length_buffer += 1
                 draft_tokens = torch.concat((draft_tokens, small.new_tokens), -1)
                 input_ids = small.new_tokens
             input_ids = draft_tokens
         else:
             input_ids = big_new_tokens[:, -1:]
-        # print("猜 tokens:", input_ids[0])
-        # print("猜:", tokenizer.decode(input_ids[0]))
+        print("猜 tokens:", input_ids[0])
+        print("猜:", tokenizer.decode(input_ids[0]))
 
         next_context = self.runtime.context_1 if step % 2 else self.runtime.context_0
         self.runtime._set_tensor(next_context, "input_ids", input_ids.squeeze(0))

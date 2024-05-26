@@ -29,8 +29,8 @@ def parse_arguments():
     parser.add_argument('--tokenizer', type=str, default=None)
     parser.add_argument('--eagle_small_model_dir', type=str, default="/mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/0503-small")
     parser.add_argument('--small_model_dir', type=str, default="/mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/0503-small")
-    parser.add_argument('--big_engine_dir', type=str, default="/mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02-trt")
     parser.add_argument('--small_engine_dir', type=str, default="/mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/0503-engine")
+    parser.add_argument('--big_engine_dir', type=str, default="/mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02-trt")
     parser.add_argument('--max_input_len', type=int, default=100)
     parser.add_argument('--max_new_tokens', type=int, default=128)
     parser.add_argument('--dtype', type=str, default="float16")
@@ -80,7 +80,6 @@ torch.cuda.set_stream(big_runner.session.stream)
 eagle_model = EaModel.from_pretrained(
     base_model_path=args.base_model_dir,
     ea_model_path=args.eagle_small_model_dir,
-    ea_engine_path=args.small_engine_dir,
     torch_dtype=torch.float16,
     load_in_4bit=False,
 ).eval().cuda()
@@ -91,7 +90,7 @@ with open(args.benchmark_dataset_json, 'r') as f:
 tokenizer, bigmodel, image_processor, context_len = load_pretrained_model(
             args.base_model_dir, model_base="llava_qwen", device_map="cuda", load_in_8bit=False, load_in_4bit=False)
 dataset = create_data_loader(
-    questions[-1000:],
+    questions,
     args.image_dir,
     tokenizer,
     image_processor,
@@ -152,73 +151,42 @@ def setup_fake_prompts(input_embedding):
 fake_draft_tensor = torch.tensor([[pad_id,] * (draft_token_len + 1)]).to(torch.int32).cuda()
 print("fake_draft_tensor", fake_draft_tensor)
 
+
 phrases_lists = [
+# start
+{
+},
 # changjing
 {
-    # ' 场景'
-    53599: [53599, 118, 85254],
-    # ':[];'
-    25: [25, 1294, 26],
-    # ':[公交车道];'
-    7259: [7259, 107500, 44793, 5265,],
+    7259:  [7259, 107500, 44793, 5265, 104307, 25], # ':[公交车道];天气:'
+    25:  [25, 1294, 26, 104307, 25], # ':[];天气:'
 },
 # tianqi
 {
-    # '天气:'
-    104307: [104307, 25,],
-    # '无;'
-    42192: [42192, 26,],
-    # '晴阴天;'
-    105212: [105212, 100205, 35727, 26,],
+    # '无;时间:'
+    42192:     [42192, 26, 20450, 25],
+    # '晴阴天;时间:'
+    105212:     [105212, 100205, 35727, 26, 20450, 25],
+    # '雨天;时间:'
+    100029:     [100029, 35727, 26, 20450, 25],
 },
 # shijian 
 {
-    # '时间:'
-    20450: [20450, 25,],
-    # '无;'
-    42192: [42192, 26,],
-    # '白天;'
-    106772: [106772, 26,],
-    # '黑夜;'
-    117507: [117507, 26,],
+    42192:  [42192, 26, 101178, 31905, 25], # '无;道路类型:'
+    106772: [106772, 26, 101178, 31905, 25], # '白天;道路类型:'
+    108036: [117507, 26, 101178, 31905, 25], # '黑夜;道路类型:'
 },
 # daolu
 {
-    # '道路类型:'
-    101178: [101178, 31905, 25,],
-    # '普通道路;'
-    100714: [100714, 101178, 26,],
-    # '高速;'
-    100806: [100806, 26,],
-    # '无;'
-    42192: [42192, 26,],
+    42192: [42192, 26, 56278, 30767, 111363, 7259,], # '无;备选车道:[''
+    100714:  [100714, 101178, 26, 56278, 30767, 111363, 7259,], # '普通道路;备选车道:['
+    100806: [100806, 26, 56278, 30767, 111363, 7259,], # '高速;备选车道:['
 },
 # beixuan
 {
-    # '备选车道:['
-    56278: [56278, 30767, 111363, 7259,],
-    # '无,'
-    42192: [42192, 11,],
-    # '普通,'
-    100714: [100714, 11,],
-    # '公交];'
-    102540: [102540, 5265,],
-},
-# ziche
-{
-    # '自车车道:'
-    35926: [35926, 39953, 111363, 25,],
-    # '无; <eos>'
-    42192: [42192, 26, 220, 151643,],
-    # '右侧; <eos>'
-    113658: [113658, 26, 220, 151643,],
-    # '中间; <eos>'
-    104399: [104399, 26, 220, 151643,],
-    # '左侧; <eos>'
-    111687: [111687, 26, 220, 151643,],
-},
-# wenben
-{
+    # 42192:  [42192, 11,], # '无,'
+    # 100714: [100714, 11,], # '普通,'
+    5265:   [5265, 35926, 39953, 111363, 25, 42192, 26,], # '];自车车道:无;'
 },
 ]
 for phrases_list in phrases_lists:
@@ -229,47 +197,47 @@ prefix = torch.Tensor([53599, 118, 85254]).to(torch.int32).reshape([1, 3]).cuda(
 prefix_len = 3
 
 class Status(IntEnum):
-    changjing = 0
-    tianqi = 1
-    shijian = 2
-    daolu = 3
-    beixuan = 4
-    ziche = 5
-    wenben = 6
+    start = 0
+    changjing = 1
+    tianqi = 2
+    shijian = 3
+    daolu = 4
+    beixuan = 5
+    ziche = 6
+    wenben = 7
 
 class Choices:
 
     def __init__(self):
-        # self.status = Status.start
+        self.status = Status.start
         self.is_empty_changjing = False
         self.is_temp_light = False
-        self.debug = False
-        self.table_search = args.use_table_search
+        self.debug = True
 
     def get_phrase_token(self, output_ids):
         new_token_len = 1
         # print("phrases", phrases_list)
         new_token = output_ids[:, -1:]
-        new_token_item = new_token.item()
-        if self.table_search:
+        print("args.use_table_search", args.use_table_search)
+        if args.use_table_search:
             new_token_item = new_token.item()
             out_str = tokenizer.decode(output_ids[0])
             if self.debug:
                 print("string:", out_str)
-            if "文本" in out_str:
-                self.status = Status.wenben
-            elif "自车车道" in out_str:
-            # if "自车车道" in out_str:
-                self.status = Status.ziche
-            elif "备选车道" in out_str:
+            # if "文本" in out_str:
+                # self.status = Status.wenben
+            # elif "自车车道" in out_str:
+                # self.status = Status.ziche
+            # elif "备选车道" in out_str:
+            if "备选车道" in out_str:
                 self.status = Status.beixuan
-            # elif "道路类型" in out_str:
-                # status = Status.daolu
+            elif "道路类型" in out_str:
+                status = Status.daolu
             elif "时间" in out_str:
                 self.status = Status.shijian
+            elif "天气" in out_str:
+                self.status = Status.tianqi
             elif "场景" in out_str:
-                self.status = Status.changjing
-            else:
                 self.status = Status.start
 
             phrases_list = phrases_lists[int(self.status)]
@@ -277,25 +245,13 @@ class Choices:
                 print("new_token_item", new_token_item)
             if new_token_item in phrases_list:
                 new_token, new_token_len = phrases_list[new_token_item]
-                # new_tokens = torch.concat((output_ids[:, -1:], new_token), -1)
                 if self.debug:
-                    print("猜:", tokenizer.decode(new_token[0]))
+                    print("查表:", tokenizer.decode(new_token[0]))
 
             if self.debug:
                 print("self.status", self.status)
                 print("new_tokens", new_token)
                 print("new_token_len", new_token_len)
-
-        if new_token_len < draft_token_len + 1:
-            new_token = torch.concat((new_token, fake_draft_tensor[:, new_token_len:(draft_token_len + 1)]), dim=-1)
-            new_token_len = draft_token_len + 1
-        # if new_token_len < 2:
-            # new_token = torch.concat((new_token, fake_draft_tensor[:, new_token_len:2]), dim=-1)
-            # new_token_len = 2
-        elif new_token_len > (draft_token_len + 1):
-            new_token = new_token[:, :(draft_token_len + 1)]
-            new_token_len = (draft_token_len + 1)
-
         return new_token, new_token_len, None
 
 
@@ -314,9 +270,8 @@ for i in range(draft_token_len+1):
     acc_lens[i] = 0
 
 total_generate_time = 0.
-total_big_time = 0.
+sp_time = 0.
 prefill = 0.
-small_prefill = 0.
 def decode_regular(self,
                    use_sp: bool,
                    batch_size: int,
@@ -346,8 +301,9 @@ def decode_regular(self,
                    cross_attention_mask: torch.Tensor = None,
                    **kwargs):
     assert(batch_size == 1)
-    global total_big_time
+    global sp_time
     global total_generate_time
+    sp_time = 0.
     prefill = 0.
     kv_cache_block_pointers = []
     host_kv_cache_block_pointers = []
@@ -363,7 +319,8 @@ def decode_regular(self,
     self.phrase_len = 0
     self.lm_head_time = 0.
     choices = Choices()
-    self.prefix_len = prefix_len
+    if prefix_len > 0:
+        output_ids = prefix
     total_accept_length = 0
 
     def get_outputs_dict(output_ids, total_accept_length, step):
@@ -433,17 +390,11 @@ def decode_regular(self,
 
             big_new_tokens = torch.argmax(generation_logit, dim=-1).to(torch.int32)
             # NOTE: self.accept_lengths are the lengths of accepted tokens in the current step
+            accept_length = torch.Tensor([1]).to(torch.int32).cuda()
             ### context_lengths += 1
 
-            if prefix_len > 0:
-                posterior_mask = (prefix == big_new_tokens[:, :-1]).int()
-                accept_length = (torch.cumprod(posterior_mask, dim=1)).sum(dim=1)
-                assert(accept_length == self.prefix_len)
-            big_new_tokens = big_new_tokens[:, :accept_length+1]
-            accept_length = torch.Tensor([1]).to(torch.int32).cuda()
-
             if args.use_mds:
-                self.sequence_length_buffer += draft_token_len + 1
+                self.sequence_length_buffer += new_token_len
             else:
                 self.sequence_length_buffer += 1
             ## for small
@@ -451,13 +402,16 @@ def decode_regular(self,
                 new_embedding = bigmodel.model.embed_tokens(big_new_tokens[:, -1:])
                 input_embedding = torch.concat((input_embedding[:,1:,:], new_embedding), 1)
             total_hidden_states = hidden_states_output
-            output_ids = big_new_tokens
+            if prefix_len > 0:
+                output_ids = torch.concat((output_ids, big_new_tokens), -1)
+            else:
+                output_ids = big_new_tokens
         else:
             generation_phase_step_count = generation_phase_step_count + 1
 
             big_new_tokens = torch.argmax(generation_logit, dim=-1).to(torch.int32)
-            # print("input_ids[:, :]", input_ids)
-            # print("big_new_tokens[:, :]", big_new_tokens)
+            print("input_ids[:, :]", input_ids)
+            print("big_new_tokens[:, :]", big_new_tokens)
 
             posterior_mask = (input_ids[:, 1:] == big_new_tokens[:, :-1]).int()
             accept_length = (torch.cumprod(posterior_mask, dim=1)).sum(dim=1)
@@ -472,8 +426,7 @@ def decode_regular(self,
                 # small.accept_lengths = accept_length
             if args.use_mds or args.use_table_search:
                 self.update_kv_cache_draft_token_location(batch_size, self.medusa_paths[0][:new_token_len], accept_length)
-            else:
-                self.sequence_length_buffer += 1
+            # self.sequence_length_buffer -= new_token_len
 
             ## for small
             if args.use_mds:
@@ -483,38 +436,31 @@ def decode_regular(self,
                 else:
                     total_hidden_states = hidden_states_output[:, :accept_length]
             acc_lens[accept_length.item()-1] += 1
-            total_accept_length += accept_length
 
             output_ids = torch.concat((output_ids, big_new_tokens), -1)
-            # if accept_length < 11:
-                # print("input_ids[:, :]", input_ids)
-                # print("big_new_tokens[:, :]", big_new_tokens)
-                # print("目前: tokens:", output_ids[0])
-                # print("目前:", tokenizer.decode(output_ids[0]))
         # output_ids.item()
         end = time.time()
-        if count > 1:
-            if (step > 0):
-                total_big_time += end - start
-            else:
-                prefill = end - start
+        if (step > 0):
+            sp_time += end - start
+        else:
+            prefill = end - start
 
-        # print("目前: tokens:", output_ids[0])
-        # print("目前:", tokenizer.decode(output_ids[0]))
+        print("目前: tokens:", output_ids[0])
+        print("目前:", tokenizer.decode(output_ids[0]))
         # 108704 is "文本"
         # should_stop = (self.end_ids in output_ids[0]) or (108704 in output_ids[0])
         should_stop = (self.end_ids in output_ids[0])
+        total_accept_length += accept_length
         if should_stop is not None and should_stop:
             profile_fn(benchmark_profiler, generation_phase_step_count)
             if args.use_mds:
                 self.sequence_length_buffer = self.sequence_length_buffer - self.num_medusa_tokens
             final_output_ids = output_ids
-            # if count > 1:
-                # print("prefill", prefill)
-                # print("small_prefill", small_prefill)
-                # print("total_big_time", total_big_time / (count + 1))
-                # print("small time", (total_generate_time - total_big_time) / (count + 1))
-                # print("total_time", total_generate_time / (count + 1))
+            print("prefill", prefill)
+            print("self.lm_head_time", self.lm_head_time)
+            print("big_time", sp_time)
+            print("small time", total_generate_time / (count + 1) - sp_time)
+            print("total_time", total_generate_time / (count + 1))
             if self.mapping.is_first_pp_rank():
                 if return_dict:
                     return get_outputs_dict(final_output_ids, total_accept_length, step + 1)
@@ -541,34 +487,29 @@ def decode_regular(self,
                 head=self.lm_head,
                 logits_processor=None,
                 max_length=draft_token_len,
-                # end_ids=self.end_ids,
             )
-            # fake_draft_tensor[:,:(ea_logits.shape[0]+1)] = torch.concat((input_ids, ea_logits.unsqueeze(0)), dim=-1).to(torch.int32)
-            # input_ids = fake_draft_tensor
             input_ids = torch.concat((input_ids, ea_logits.unsqueeze(0)), dim=-1).to(torch.int32)
             new_token_len = input_ids.shape[1]
-            eagle_model.ea_layer.revert_kv(ea_logits.shape[0]-1)
+            eagle_model.ea_layer.revert_kv(new_token_len-2)
             total_hidden_states = None
         else:
             input_ids = big_new_tokens[:, -1:]
-        # print("猜 tokens:", input_ids[0])
-        # print("猜:", tokenizer.decode(input_ids[0]))
+        print("猜: tokens:", input_ids[0])
+        print("猜:", tokenizer.decode(input_ids[0]))
 
         next_context = self.runtime.context_1 if step % 2 else self.runtime.context_0
         self.runtime._set_tensor(next_context, "input_ids", input_ids.squeeze(0))
-        # self.runtime._set_tensor(next_context, "medusa_packed_mask", medusa_packed_mask[:,:new_token_len].detach().clone())
-        # self.runtime._set_tensor(next_context, "medusa_position_offsets", medusa_position_offsets[:,:new_token_len].detach().clone())
+        # next_step_tensors['host_past_key_value_lengths'].to_torch().copy_(self.sequence_length_buffer)
 
+        self.runtime._set_tensor(next_context, "medusa_packed_mask", medusa_packed_mask[:,:new_token_len].detach().clone())
+        self.runtime._set_tensor(next_context, "medusa_position_offsets", medusa_position_offsets[:,:new_token_len].detach().clone())
         self.new_token_num = new_token_len
         current_len += accept_length.item()
         # print("self.new_token_num", self.new_token_num)
 
         end = time.time()
-        if count > 1:
-            if (step > 0):
-                total_generate_time += end - start
-            else:
-                small_prefill = end - start - prefill
+        if (step > 0):
+            total_generate_time += end - start
         # if step == 1:
             # exit()
 
@@ -840,8 +781,8 @@ with torch.inference_mode():
     # while count < args.benchmark_steps:
     for idx, data in enumerate(dataset):
         (input_ids, image_tensor, image_sizes, prompt) = data
-        print("prompt:", prompt)
-        print("input_ids:", input_ids.shape)
+        # print("prompt:", prompt)
+        # print("input_ids:", input_ids)
 
         input_ids = input_ids.to(device='cuda', non_blocking=True)
         if prefix_len > 0:
@@ -955,10 +896,10 @@ print("Avg output len:", total_token / count)
 print("Avg acc len:", avg_acc_lens / count - 1)
 print("Avg tokens / step:", avg_acc_lens / count)
 print("Avg vit time:", total_vit_time / count)
-print("Avg total time:", (total_time) / count)
+print("Avg total time:", (total_vit_time + total_time) / count)
 print("benchmark_steps:", count)
 print("BASE TPS:", total_token / total_base_time)
 print("TPS:", total_token / total_time)
 print("acc_lens:", acc_lens)
-print("avg generate time", total_generate_time / (count))
+print("avg generate time", total_generate_time / (count + 1))
 
