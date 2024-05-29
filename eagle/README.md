@@ -25,16 +25,20 @@ python3 /lpai/volumes/cloudmodel-muses/lt/tools/eagle/convert_weight.py --big_mo
 
 cd /lpai/volumes/cloudmodel-muses/lt/TensorRT-LLM/examples/llama
 
-python3 convert_checkpoint.py --model_dir /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/0503-small/ --output_dir /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/0503-trt
+python3 convert_checkpoint.py --model_dir /mnt/volumes/cloudmodel-muses/lt/EAGLE-base/small_v3/ffn512head4-llama --output_dir /mnt/volumes/cloudmodel-muses/lt/EAGLE-base/small_v3/ffn512head4-llama-trt
 
 # build trtllm engine
 
-trtllm-build --checkpoint_dir /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/0503-trt --output_dir /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/0503-engine/ --gemm_plugin float16 --paged_kv_cache disable --max_input_len 2048 --max_output_len 512 --max_num_tokens 2048 --max_batch_size 16
+trtllm-build --checkpoint_dir /mnt/volumes/cloudmodel-muses/lt/EAGLE-base/small_v3/ffn512head4-llama-trt --output_dir /mnt/volumes/cloudmodel-muses/lt/EAGLE-base/small_v3/ffn512head4-llama-engine/ --gemm_plugin float16 --paged_kv_cache disable --max_input_len 2048 --max_output_len 512 --max_num_tokens 2048 --max_batch_size 16
 
 # build trt engine
 
-/usr/local/tensorrt/bin/trtexec --onnx=trt-mds/generate.onnx --saveEngine=trt-mds/generate.trt --minShapes=past_key_values:2x1x16x1x128 --optShapes=past_key_values:2x1x16x800x128 --maxShapes=past_key_values:2x1x16x1024x128
+/usr/local/tensorrt/bin/trtexec --onnx=trt-eagle/prefill.onnx --saveEngine=trt-eagle/prefill.trt --minShapes=hidden_states:1x1x2048,inputs_embeds:1x1x2048,position_ids:1x1 --optShapes=hidden_states:1x600x2048,inputs_embeds:1x600x2048,position_ids:1x600 --maxShapes=hidden_states:1x800x2048,inputs_embeds:1x800x2048,position_ids:1x800
 
+/usr/local/tensorrt/bin/trtexec --onnx=trt-eagle/context.onnx --saveEngine=trt-eagle/context.trt --minShapes=hidden_states:1x1x2048,inputs_embeds:1x1x2048,past_key_values:2x1x4x600x128,position_ids:1x1 --optShapes=hidden_states:1x16x2048,inputs_embeds:1x16x2048,past_key_values:2x1x4x680x128,position_ids:1x16 --maxShapes=hidden_states:1x48x2048,inputs_embeds:1x48x2048,past_key_values:2x1x4x800x128,position_ids:1x48
+
+
+/usr/local/tensorrt/bin/trtexec --onnx=trt-eagle/generate.onnx --saveEngine=trt-eagle/generate.trt --minShapes=past_key_values:2x1x4x1x128 --optShapes=past_key_values:2x1x4x600x128 --maxShapes=past_key_values:2x1x4x800x128
 
 
 # base without eagle
@@ -216,3 +220,37 @@ CUDA_VISIBLE_DEVICES=6 python3 eval_eagle_llava_trt_mds.py --eagle_small_model_d
 		acc_lens: {0: 14, 1: 15, 2: 10, 3: 56, 4: 78, 5: 22, 6: 8, 7: 4, 8: 23, 9: 26, 10: 25, 11: 25, 12: 19, 13: 51, 14: 125, 15: 160, 16: 373, 17: 106, 18: 37, 19: 58, 20: 962}
 		avg generate time 0.020013214829928412
 
+
+# trtllm sp with trt engle engine with small lm_head
+
+cmd:
+
+CUDA_VISIBLE_DEVICES=6 python3 eval_eagle_llava_trt_mds.py --eagle_small_model_dir /mnt/volumes/cloudmodel-muses/lt/EAGLE-base/small_v3/ffn512head4/ --base_model_dir /lpai/volumes/cloudmodel-muses/lt/models/llava_qwen1.8b_siglip384_960_cdp320_task_sft_v0.6.0_bus_0 --tokenizer /lpai/volumes/cloudmodel-muses/lt/models/llava_qwen1.8b_siglip384_960_cdp320_task_sft_v0.6.0_bus_0/ --big_engine_dir /mnt/volumes/cloudmodel-muses/lt/models/llava_qwen1.8b-mds-engine/ --max_input_len 64 --max_new_tokens 512 --benchmark --batch_size 1 --benchmark_steps 100 --benchmark_dataset_json /mnt/volumes/cloudmodel-muses/lt/data/Damo/dm_v0.6.0_bus_0/navi_llava_train.json --use_sp --mds_len 20 --small_engine_dir trt-mds/ffn512head4.trt --use_small_head |tee eee.log
+
+
+		Total steps: 1000
+		Avg generate steps: 3.1923847695390783
+		Batch size: 1
+		Input len: 607.0
+		Avg output len: tensor([[41.6663]], device='cuda:0')
+		Avg acc len: tensor([16.8272], device='cuda:0')
+		Avg tokens / step: tensor([17.8272], device='cuda:0')
+		Avg vit time: 0.014057678306747774
+		Avg total time: 0.04875197152575415
+		benchmark_steps: 998
+		BASE TPS: tensor([[1.2584e+08]], device='cuda:0')
+		TPS: tensor([[854.6594]], device='cuda:0')
+		acc_lens: {0: 20, 1: 15, 2: 9, 3: 47, 4: 78, 5: 21, 6: 7, 7: 4, 8: 23, 9: 23, 10: 23, 11: 24, 12: 18, 13: 50, 14: 130, 15: 160, 16: 375, 17: 108, 18: 37, 19: 57, 20: 963}
+		avg generate time 0.021830198521126727
+		seen_tokens_set {117507, 111363, 85254, 11, 1294, 15, 16, 39953, 106772, 22, 24, 25, 26, 30767, 101178, 58, 111687, 100167, 109131, 35926, 7259, 151643, 53599, 57191, 86119, 100714, 17259, 100205, 104307, 118, 102540, 35727, 5265, 112018, 103583, 31905, 99257, 100029, 100806, 8903, 104399, 42192, 56278, 220, 20450, 108005, 107500, 44793, 113658, 105212}
+
+
+
+# yiqiang
+
+cmd:
+
+	CUDA_VISIBLE_DEVICES=1 python3 eval_eagle_llava_trt_mds_yiqiang.py --eagle_small_model_dir /mnt/volumes/cloudmodel-muses/lt/EAGLE-base/small_v3/ffn512head4/ --base_model_dir /lpai/volumes/cloudmodel-muses/lt/models/llava_qwen1.8b_siglip384_960_cdp320_task_sft_v0.6.0_bus_0 --tokenizer /lpai/volumes/cloudmodel-muses/lt/models/llava_qwen1.8b_siglip384_960_cdp320_task_sft_v0.6.0_bus_0 --small_engine_dir /mnt/volumes/cloudmodel-muses/lt/EAGLE-base/small_v3/ffn512head4-llama-engine/ --big_engine_dir /mnt/volumes/cloudmodel-muses/lt/models/llava_qwen1.8b-mds-engine --max_input_len 64 --max_new_tokens 512 --benchmark --batch_size 1 --benchmark_steps 100 --benchmark_dataset_json /mnt/volumes/cloudmodel-muses/lt/data/Damo/dm_v0.1.3_0/navi_llava_test.json --use_sp --use_mds | tee llm.log
+
+
+	CUDA_VISIBLE_DEVICES=1 python3 eval_eagle_llava_trt_mds_yiqiang.py --eagle_small_model_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/model_19 --base_model_dir /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02/ --tokenizer /lpai/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02 --small_engine_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-small/0525-engine --big_engine_dir /mnt/volumes/cloudmodel-muses/lt/models/wdf-llava-pretrain-ckpts-24-05-03-02-trt-mds/ --max_input_len 64 --max_new_tokens 512 --benchmark --batch_size 1 --benchmark_steps 100 --benchmark_dataset_json /mnt/volumes/cloudmodel-muses/lt/data/Damo/dm_v0.1.3_0/navi_llava_test.json --use_sp --use_mds | tee llm.log

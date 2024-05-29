@@ -36,6 +36,7 @@ def parse_arguments():
     parser.add_argument('--dtype', type=str, default="float16")
     parser.add_argument('--use_sp', action="store_true", default=False)
     parser.add_argument('--use_mds', action="store_true", default=False)
+    parser.add_argument('--use_small_head', action="store_true", default=False)
     parser.add_argument('--use_table_search', action="store_true", default=False)
     parser.add_argument('--benchmark', action="store_true", default=False)
     parser.add_argument('--batch_size', type=int, default=1)
@@ -49,15 +50,6 @@ def parse_arguments():
 
 args = parse_arguments()
 
-eagle_model = EaModel.from_pretrained(
-    base_model_path=args.base_model_dir,
-    ea_model_path=args.eagle_small_model_dir,
-    torch_dtype=torch.float16,
-    load_in_4bit=False,
-).eval().cuda()
-
-small_model = AutoModelForCausalLM.from_pretrained(args.small_model_dir, device_map="cuda").eval().to(torch.half).cuda()
-
 print("loading tokenizer")
 tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
 if tokenizer.pad_token_id is None:
@@ -66,6 +58,7 @@ pad_id = tokenizer.pad_token_id
 
 print("loading model")
 draft_token_len = 10
+
 medusa_choices = [[0] * draft_token_len] if args.use_mds else None
 # medusa_choices = [[0], [0, 0], [0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0, 0]]
 print("medusa_choices=", medusa_choices)
@@ -78,6 +71,7 @@ big_runner = ModelRunner.from_dir(
     rank=tensorrt_llm.mpi_rank(),
     medusa_choices=medusa_choices,
 )
+torch.cuda.set_stream(big_runner.session.stream)
 small_runner = ModelRunner.from_dir(
     engine_dir=args.small_engine_dir,
     rank=tensorrt_llm.mpi_rank(),
@@ -85,13 +79,20 @@ small_runner = ModelRunner.from_dir(
     debug_mode=False,
 )
 
+eagle_model = EaModel.from_pretrained(
+    base_model_path=args.base_model_dir,
+    ea_model_path=args.eagle_small_model_dir,
+    torch_dtype=torch.float16,
+    load_in_4bit=True,
+).eval().cuda()
+
 with open(args.benchmark_dataset_json, 'r') as f:
     questions = json.load(f)
 
 tokenizer, bigmodel, image_processor, context_len = load_pretrained_model(
             args.base_model_dir, model_base="llava_qwen", device_map="cuda", load_in_8bit=False, load_in_4bit=False)
 dataset = create_data_loader(
-    questions,
+    questions[-1000:],
     args.image_dir,
     tokenizer,
     image_processor,
@@ -148,6 +149,55 @@ def setup_fake_prompts(input_embedding):
         # np.save(prompt_table_path, torch_to_numpy(prompt_table))
     return input_ids, ptuning_args
 
+# seen token map
+seen_tokens_set = set([])
+indexes = [
+    11,
+    25,
+    26,
+    118,
+    220,
+    1294,
+    5265,
+    7259,
+    20450,
+    30767,
+    31905,
+    35727,
+    35926,
+    39953,
+    42192,
+    44793,
+    53599,
+    56278,
+    57191,
+    85254,
+    100029,
+    100205,
+    100714,
+    100806,
+    101178,
+    102540,
+    104307,
+    104399,
+    105212,
+    106772,
+    107500,
+    108005,
+    109131,
+    111363,
+    111687,
+    112018,
+    113658,
+    117507,
+    151643,
+]
+indexes = torch.Tensor(indexes).to(torch.int32).cuda()
+print("eagle_model.base_model.lm_head", eagle_model.base_model.lm_head, flush=True)
+slice_weight = eagle_model.base_model.lm_head.weight.data[indexes, :]
+small_head = torch.nn.Linear(slice_weight.shape[1], slice_weight.shape[0], bias=False, device=slice_weight.device, dtype=slice_weight.dtype)
+print("small_head", small_head, flush=True)
+small_head.weight.data = slice_weight
 
 fake_draft_tensor = torch.tensor([[pad_id,] * (draft_token_len + 1)]).to(torch.int32).cuda()
 print("fake_draft_tensor", fake_draft_tensor)
@@ -236,6 +286,9 @@ phrases_lists = [
 for phrases_list in phrases_lists:
     for key in phrases_list:
         phrases_list[key] = (torch.Tensor(phrases_list[key]).to(torch.int32).unsqueeze(0).cuda(), len(phrases_list[key]))
+
+prefix = torch.Tensor([53599, 118, 85254]).to(torch.int32).reshape([1, 3]).cuda()
+prefix_len = 3
 
 class Status(IntEnum):
     start = 0
@@ -364,9 +417,14 @@ def decode_regular(self, small,
     context_logits = None
     generation_logits = []
     self.lm_head = eagle_model.base_model.lm_head
+    self.prefix_len = prefix_len
     small.lm_head = eagle_model.base_model.lm_head
+    small.small_head = small_head
     small.embed_tokens = eagle_model.base_model.model.embed_tokens
-    small.fc = small_model.fc
+    small.fc = eagle_model.ea_layer.fc
+    small.use_small_head = args.use_small_head
+    small.indexes = indexes
+    # small.fc_back = eagle_model.ea_layer.fc_back
     small.medusa_paths = self.medusa_paths
     # output_ids = [get_prefix()]
     # input_ids = torch.concat((input_ids.cuda(), get_prefix().squeeze(0)), dim=-1)
@@ -409,7 +467,7 @@ def decode_regular(self, small,
                                                 step_count)
 
     self.total_time = 0.
-    eagle_model.ea_layer.reset_kv()
+    eagle_model.ea_layer.reset_kv(0)
 
     next_step_tensors = None
     next_step_tensors_s = None
@@ -440,11 +498,16 @@ def decode_regular(self, small,
             if benchmark_profiler is not None:
                 benchmark_profiler.record_cuda_event('first_token')
 
-            big_new_tokens = torch.argmax(generation_logit, dim=-1)
+            big_new_tokens = torch.argmax(generation_logit, dim=-1).to(torch.int32)
             # NOTE: self.accept_lengths are the lengths of accepted tokens in the current step
+            if prefix_len > 0 and args.use_mds:
+                posterior_mask = (prefix == big_new_tokens[:, :-1]).int()
+                accept_length = (torch.cumprod(posterior_mask, dim=1)).sum(dim=1)
+                assert(accept_length == self.prefix_len)
+            big_new_tokens = big_new_tokens[:, :accept_length+1]
             accept_length = torch.Tensor([1]).to(torch.int32).cuda()
+
             ### context_lengths += 1
-            output_ids = big_new_tokens
 
             if args.use_mds:
                 self.sequence_length_buffer += draft_token_len + 1
@@ -454,6 +517,7 @@ def decode_regular(self, small,
             if args.use_mds and not args.use_table_search:
                 new_embedding = bigmodel.model.embed_tokens(big_new_tokens[:, -1:])
                 input_embedding = torch.concat((input_embedding, new_embedding), 1)
+            output_ids = big_new_tokens
         else:
             generation_phase_step_count = generation_phase_step_count + 1
 
@@ -464,16 +528,22 @@ def decode_regular(self, small,
             posterior_mask = (input_ids[:, 1:] == big_new_tokens[:, :-1]).int()
             accept_length = (torch.cumprod(posterior_mask, dim=1)).sum(dim=1)
             accept_length += 1
+            
             # accept_length = torch.Tensor([1]).to(torch.int32).cuda()
 
             # NOTE: self.sequence_length_buffer = num_past_kv_cache (accepted) + num_medusa_tokens + 1
             big_new_tokens = big_new_tokens[:, :accept_length]
             # NOTE: self.accept_lengths are the lengths of accepted tokens in the current step
             self.accept_lengths = accept_length
+            # small.accept_lengths = accept_length
             # if args.use_mds and not args.use_table_search:
                 # small.accept_lengths = accept_length
             if args.use_mds or args.use_table_search:
+                # print("================")
                 self.update_kv_cache_draft_token_location(batch_size, self.medusa_paths[0][:new_token_len], accept_length)
+                # print("****************")
+                #self.update_kv_cache_draft_token_location(batch_size, self.medusa_paths[0][:new_token_len], accept_length)
+                #print("================")
             else:
                 self.sequence_length_buffer += 1
 
@@ -481,6 +551,7 @@ def decode_regular(self, small,
 
             ## for small
             if args.use_mds and not args.use_table_search:
+                # print("big model output hidden_state=",hidden_states_output.shape )
                 hidden_states_output = hidden_states_output[:, :accept_length].clone()
                 input_embedding = torch.concat((input_embedding, bigmodel.model.embed_tokens(big_new_tokens[:, :accept_length])), 1)
 
@@ -489,30 +560,24 @@ def decode_regular(self, small,
         if (step > 0):
             sp_time += end - start
 
-        print("目前: tokens:", output_ids[0])
-        print("目前:", tokenizer.decode(output_ids[0]))
+        # print("目前: tokens:", output_ids[0])
+        # print("目前:", tokenizer.decode(output_ids[0]))
         total_accept_length += accept_length
         current_len += accept_length.item()
-        should_stop = (small.end_ids in output_ids[0, -1])
+        should_stop = (small.end_ids in output_ids[0])
         if should_stop is not None and should_stop:
             profile_fn(benchmark_profiler, generation_phase_step_count)
             if args.use_mds:
                 self.sequence_length_buffer = self.sequence_length_buffer - self.num_medusa_tokens
-                
-            # if self.is_medusa_mode:
-                # # just hack away for now
-                # final_output_ids = self.output_ids.clone().unsqueeze(1)
-            # else:
-                # final_output_ids = self.finalize_decoder(
-                    # context_lengths, batch_size, beam_width, scfg)
+
             final_output_ids = output_ids
 
-            print("self.total_time", self.total_generate_time)
-            print("prefill", prefill)
-            print("self.lm_head_time", self.lm_head_time)
-            print("big_time", sp_time)
-            print("small time", total_generate_time - sp_time)
-            print("total_time", total_generate_time)
+            # print("self.total_time", self.total_generate_time)
+            # print("prefill", prefill)
+            # print("self.lm_head_time", self.lm_head_time)
+            # print("big_time", sp_time)
+            # print("small time", total_generate_time - sp_time)
+            # print("total_time", total_generate_time)
 
             if self.mapping.is_first_pp_rank():
                 if return_dict:
@@ -535,37 +600,41 @@ def decode_regular(self, small,
             input_ids = phrase_tokens
         elif args.use_mds and False:
             draft_tokens = big_new_tokens[:, -1:]
-            ea_logits, _, _ = eagle_model.ea_layer.topK_genrate(
+            ea_logits, _, _ = eagle_model.ea_layer.topOne_genrate(
                 hidden_states_output,
-                input_embedding,
+                input_embedding[:, 1:],
                 head=self.lm_head,
-                logits_processor=None
+                logits_processor=None,
+                max_length=draft_token_len,
+                prefill=(step == 0),
+                # end_ids=self.end_ids,
             )
-            input_ids = torch.concat((draft_tokens, ea_logits[:, 0].reshape(draft_tokens.shape[0], draft_token_len)), dim=-1).to(torch.int32)
-            new_token_len = draft_token_len + 1
+            input_ids = torch.concat((draft_tokens, ea_logits.unsqueeze(0)), dim=-1).to(torch.int32)
+            new_token_len = input_ids.shape[1]
+            eagle_model.ea_layer.revert_kv(ea_logits.shape[0]-1)
+            # total_hidden_states = None
         elif args.use_mds:
             draft_tokens = big_new_tokens[:, -1:]
-            # print("input inputs_embeds", input_embedding[:, 1:])
-            # print("input small_hidden_states", hidden_states_output)
             if (step == 0):
                 total_hidden_states = torch.concat((input_embedding[:, 1:], hidden_states_output), dim=-1)
             else:
                 total_hidden_states = torch.concat((total_hidden_states,
                     torch.concat((input_embedding[:, -accept_length:], hidden_states_output), dim=-1)), dim=1)
-            small_hidden_states = small_model.fc(total_hidden_states).squeeze(0)
+
+            small_hidden_states = eagle_model.ea_layer.fc(total_hidden_states).squeeze(0)
 
             next_step_tensors_s = None
-            context_lengths_s = context_lengths_o.clone()
+            
+            context_lengths_s = (self.sequence_length_buffer - self.num_medusa_tokens -1).clone()
             host_context_lengths_s = context_lengths_s.cpu()
             max_context_length_s = small_hidden_states.shape[0]
             input_ids = torch.arange(small_hidden_states.shape[0]).to(torch.int32)
 
+            # print("fc hidden_states", small_hidden_states)
+
             for idx in range(draft_token_len):
-                #print("===================")
-                #print("==draft_idx=", idx)
-                #print("===draft input_ids", input_ids)
-                #print("small_hidden_states", small_hidden_states)
-                # print("context_lengths", context_lengths)
+                # torch.cuda.synchronize()
+                # small_start = time.time()
                 should_stop_, next_step_tensors_s, tasks_s, context_lengths_s, host_context_lengths_s, attention_mask_, logits_, generation_logit_, encoder_input_lengths_s, small_hidden_states = small.handle_per_step(
                     small_cache_indirections, idx, batch_size, max_context_length_s,
                     beam_width, input_ids, small_hidden_states, scfg,
@@ -576,54 +645,17 @@ def decode_regular(self, small,
                     bad_words_list, no_repeat_ngram_size, encoder_output,
                     encoder_input_lengths_s, stopping_criteria, logits_processor,
                     **kwargs)
-                # print("context_lengths", context_lengths)
-                sys.stdout.flush()
-                # if (idx == 0):
-                #    out_hidden, past_key_values = eagle_model.ea_layer(
-                #        hidden_states_output, inputs_embeds=input_embedding[:, 1:], use_cache=True)
-                #    last_hidden = out_hidden[:, -1]
-                #    last_headout = small.lm_head(last_hidden)
-                #    next_token = torch.argmax(last_headout)
-                #    inputs_embeds = small.embed_tokens(next_token)[None, :]
-                #    small_hidden_states.copy_(small.fc(torch.cat((inputs_embeds, out_hidden[0, -1:]), dim=-1)))
-                #    small.new_tokens = next_token.reshape([1,1])
-                #    past_key_value = next_step_tensors_s['past_key_value_0'].to_torch()
-                #    big_past_key_value = next_step_tensors['past_key_value_0'].to_torch()
-
-                # print("big context_lengths", next_step_tensors['context_lengths'].to_torch())
-                # print("big cache_indirection", next_step_tensors['cache_indirection'].to_torch())
-                # print("big last_token_ids", next_step_tensors['last_token_ids'].to_torch())
-                # print("big hidden_states_output", next_step_tensors['hidden_states_output'].to_torch())
-                # print("big host_context_lengths", next_step_tensors['host_context_lengths'].to_torch())
-                # print("big position_ids", next_step_tensors['position_ids'].to_torch())
-                # print("big host_past_key_value_lengths", next_step_tensors['host_past_key_value_lengths'].to_torch())
-                # print("big host_request_types", next_step_tensors['host_request_types'].to_torch())
-                # print("big sequence_length", next_step_tensors['sequence_length'].to_torch())
-                # print("big host_sink_token_length", next_step_tensors['host_sink_token_length'].to_torch())
-                # print("big host_max_attention_window_size_0", next_step_tensors['host_max_attention_window_size_0'].to_torch())
-                # print("next_step_tensors_s", next_step_tensors_s)
-                # print("context_lengths", next_step_tensors_s['context_lengths'].to_torch())
-                # print("cache_indirection", next_step_tensors_s['cache_indirection'].to_torch())
-                # print("last_token_ids", next_step_tensors_s['last_token_ids'].to_torch())
-                # print("hidden_states_output", next_step_tensors_s['hidden_states_output'].to_torch())
-                # print("hidden_states_input", next_step_tensors_s['hidden_states_input'].to_torch())
-                # print("input_ids", next_step_tensors_s['input_ids'].to_torch())
-                # print("host_context_lengths", next_step_tensors_s['host_context_lengths'].to_torch())
-                # print("position_ids", next_step_tensors_s['position_ids'].to_torch())
-                # print("host_past_key_value_lengths", next_step_tensors_s['host_past_key_value_lengths'].to_torch())
-                # print("host_request_types", next_step_tensors_s['host_request_types'].to_torch())
-                # print("sequence_length", next_step_tensors_s['sequence_length'].to_torch())
-                # print("host_sink_token_length", next_step_tensors_s['host_sink_token_length'].to_torch())
-                # print("host_max_attention_window_size_0", next_step_tensors_s['host_max_attention_window_size_0'].to_torch())
-                # exit()
                 small.sequence_length_buffer += 1
                 draft_tokens = torch.concat((draft_tokens, small.new_tokens), -1)
                 input_ids = small.new_tokens
+                # torch.cuda.synchronize()
+                # small_end = time.time()
+                # print("Small total time:", small_end - small_start, "s")
             input_ids = draft_tokens
         else:
             input_ids = big_new_tokens[:, -1:]
-        print("猜 tokens:", input_ids[0])
-        print("猜:", tokenizer.decode(input_ids[0]))
+        # print("猜 tokens:", input_ids[0])
+        # print("猜:", tokenizer.decode(input_ids[0]))
 
         next_context = self.runtime.context_1 if step % 2 else self.runtime.context_0
         self.runtime._set_tensor(next_context, "input_ids", input_ids.squeeze(0))
@@ -637,15 +669,16 @@ def decode_regular(self, small,
             total_generate_time += end - start
         else:
             prefill = end - start
-        #if step == 10:
-        #    exit()
+        # if step == 0:
+            # exit()
 
-    assert not self.is_medusa_mode, "the custom decoder doesn't support medusa."
+    # assert not self.is_medusa_mode, "the custom decoder doesn't support medusa."
 
     profile_fn(benchmark_profiler, generation_phase_step_count)
 
     # final_output_ids = self.finalize_decoder(context_lengths, batch_size,
                                              # beam_width, scfg)
+    print("====output_ids=", output_ids)
     final_output_ids = torch.concat(output_ids, -1)
     if self.mapping.is_first_pp_rank():
         if return_dict:
@@ -915,6 +948,8 @@ def generate(self, small_runner,
         lora_uids=lora_uids,
         medusa_choices=medusa_choices)
 
+    # print("sample=", sampling_config)
+    # exit()
     small_runner.session.setup(
         batch_size=batch_size,
         max_context_length=input_lengths.max().item(),
@@ -966,6 +1001,8 @@ with torch.inference_mode():
         # print("input_ids:", input_ids)
 
         input_ids = input_ids.to(device='cuda', non_blocking=True)
+        if prefix_len > 0:
+            input_ids = torch.concat((input_ids.cuda(), prefix), dim=-1)
 
         vit_start = time.time()
         position_ids=None
@@ -1036,11 +1073,17 @@ with torch.inference_mode():
         end = time.time()
 
         # print(outputs)
-        new_token = outputs['sequence_lengths'] - input_token_len
+        if prefix_len > 0:
+            new_token = outputs['sequence_lengths'] - input_token_len + prefix_len
+        else:
+            new_token = outputs['sequence_lengths'] - input_token_len
+
         generate_steps = outputs['step']
-        avg_acc_len = outputs['total_accept_length'] * 1. / generate_steps
+        avg_acc_len = outputs['total_accept_length'] * 1. / (generate_steps - 1)
         # generation_logits = outputs['generation_logits']
         outputs = outputs['output_ids']
+        seen_tokens_set = set(outputs.cpu().numpy().flatten()) | seen_tokens_set
+
         # print("outputs_id:", outputs.cpu())
         if False:
             outputs = outputs[:, input_token_len:]
@@ -1073,4 +1116,5 @@ print("Avg total time:", (total_vit_time + total_time) / count)
 print("benchmark_steps:", count)
 print("BASE TPS:", total_token / total_base_time)
 print("TPS:", total_token / total_time)
+print("seen_tokens_set", seen_tokens_set)
 
