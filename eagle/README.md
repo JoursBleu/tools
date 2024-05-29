@@ -41,6 +41,14 @@ trtllm-build --checkpoint_dir /mnt/volumes/cloudmodel-muses/lt/EAGLE-base/small_
 /usr/local/tensorrt/bin/trtexec --onnx=trt-eagle/generate.onnx --saveEngine=trt-eagle/generate.trt --minShapes=past_key_values:2x1x4x1x128 --optShapes=past_key_values:2x1x4x600x128 --maxShapes=past_key_values:2x1x4x800x128
 
 
+/usr/local/tensorrt/bin/trtexec --onnx=trt-eagle/prefill.onnx --saveEngine=trt-eagle/prefill.trt --minShapes=hidden_states:1x1x2048,inputs_embeds:1x1x2048,position_ids:1x1 --optShapes=hidden_states:1x600x2048,inputs_embeds:1x600x2048,position_ids:1x600 --maxShapes=hidden_states:1x800x2048,inputs_embeds:1x800x2048,position_ids:1x800
+
+/usr/local/tensorrt/bin/trtexec --onnx=trt-eagle/context.onnx --saveEngine=trt-eagle/context.trt --minShapes=hidden_states:1x1x2048,inputs_embeds:1x1x2048,past_key_values:2x1x16x600x128,position_ids:1x1 --optShapes=hidden_states:1x16x2048,inputs_embeds:1x16x2048,past_key_values:2x1x16x680x128,position_ids:1x16 --maxShapes=hidden_states:1x48x2048,inputs_embeds:1x48x2048,past_key_values:2x1x16x800x128,position_ids:1x48
+
+
+/usr/local/tensorrt/bin/trtexec --onnx=trt-eagle/generate.onnx --saveEngine=trt-eagle/generate.trt --minShapes=past_key_values:2x1x16x1x128 --optShapes=past_key_values:2x1x16x600x128 --maxShapes=past_key_values:2x1x16x800x128
+
+
 # base without eagle
 
 cmd:
