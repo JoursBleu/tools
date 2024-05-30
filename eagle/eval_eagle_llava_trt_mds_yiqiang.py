@@ -934,7 +934,7 @@ def generate(self, small_runner,
     self._check_inputs(batch_input_ids, sampling_config)
 
     batch_size = len(batch_input_ids)
-    batch_input_ids, input_lengths = self._prepare_inputs(
+    batch_input_ids, input_lengths, max_length = self._prepare_inputs(
         batch_input_ids, sampling_config.pad_id)
 
     self.session.setup(
