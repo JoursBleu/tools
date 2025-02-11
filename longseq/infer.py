@@ -7,17 +7,23 @@ from datasets import load_from_disk
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache, StaticCache
 
+# from qwen_agent.agents.doc_qa import ParallelDocQA
+
+BASE_URL = "https://lpai-inference-miyun.inner.chj.cloud/inference/lpai-demo/qwen2-5-serving-trtllm/v1"
+
 template_0shot = open('/lpai/volumes/lpai-demo-muses/lt/LongBench/prompts/0shot.txt', encoding='utf-8').read()
 
 tokenizer = AutoTokenizer.from_pretrained("/lpai/volumes/lpai-demo-muses/lt/models/Qwen2.5-7B-Instruct")
 model = AutoModelForCausalLM.from_pretrained(
             "/lpai/volumes/lpai-demo-muses/lt/models/Qwen2.5-7B-Instruct",
-            use_flash_attention_2=False,
+            attn_implementation="flash_attention_2",
             torch_dtype=torch.float16,
             # load_in_8bit=True,
             device_map="auto",
         )
 model = model.eval() # .cuda().half()
+
+# bot = ParallelDocQA(llm={'model': 'qwen2.5-72b-instruct', 'model_server': BASE_URL, 'generate_cfg': {'max_retries': 10}})
 
 # data = load_from_disk(
     # f"data/longbench/{dataset[0]}"
@@ -28,11 +34,17 @@ system = '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start
 text = '<text>\n$DOC$\n</text>\n\n'
 question = 'What is the correct answer to this question: $Q$\nChoices:\n(A) $C_A$\n(B) $C_B$\n(C) $C_C$\n(D) $C_D$\n\nFormat your response as follows: "The correct answer is (insert answer here)".\n<|im_end|>\n'
 
+
+# system_qwen = 'Please read the following text and answer the question below.\n\n'
+# text_qwen = '<text>\n$DOC$\n</text>\n\n'
+# question_qwen = 'What is the correct answer to this question: $Q$\nChoices:\n(A) $C_A$\n(B) $C_B$\n(C) $C_C$\n(D) $C_D$\n\nFormat your response as follows: "The correct answer is (insert answer here)".\n'
+
+
 system_id = tokenizer(system, return_tensors='pt').to("cuda")
 _, system_len = system_id['input_ids'].shape
 
 max_new_tokens = 128
-page_size = 4096
+page_size = 6144
 max_len = 120000
 
 # for ele in data:
@@ -42,16 +54,24 @@ max_len = 120000
     # print("length", ele["length"], "token num", len(input_ids))
 # breakpoint()
 
+# system_output = model.generate(**system_id, max_new_tokens=1, return_dict_in_generate=True)
+# system_kv = system_output["past_key_values"]
+
+index = 0
 for ele in data:
-    # if ele["length"] == "long":
+    index += 1
+    # if index < 144:
         # continue
+    if "long" not in ele["length"]:
+        continue
+    # breakpoint()
     context = ele['context']
     prompt = text.replace('$DOC$', context.strip())
 
-    # input_ids = tokenizer.encode(prompt)
-    # if len(input_ids) > max_len:
-        # input_ids = input_ids[:max_len//2] + input_ids[-max_len//2:]
-        # prompt = tokenizer.decode(input_ids, skip_special_tokens=True)
+    input_ids = tokenizer.encode(prompt)
+    if len(input_ids) > max_len:
+        input_ids = input_ids[:max_len//2] + input_ids[-max_len//2:]
+        prompt = tokenizer.decode(input_ids, skip_special_tokens=True)
 
     choice_question = question.replace('$Q$', ele['question'].strip()).replace('$C_A$', ele['choice_A'].strip()).replace('$C_B$', ele['choice_B'].strip()).replace('$C_C$', ele['choice_C'].strip()).replace('$C_D$', ele['choice_D'].strip())
     input_ids = tokenizer(system+prompt+choice_question, return_tensors='pt').to("cuda")
@@ -62,16 +82,17 @@ for ele in data:
     # # print("input_len_org", input_len_org)
     # torch.cuda.synchronize()
     # start = time.time()
-    # output_org = model.generate(**input_ids, max_new_tokens=max_new_tokens, cache_implementation="offloaded")
-    # # output_org = model.generate(**input_ids, max_new_tokens=max_new_tokens, do_sample=True)
+    # # output_org = model.generate(**input_ids, max_new_tokens=max_new_tokens, cache_implementation="offloaded", do_sample=False)
+    # output_org = model.generate(**input_ids, max_new_tokens=max_new_tokens, do_sample=False)
     # response = tokenizer.decode(output_org[0, input_len_org:])
     # torch.cuda.synchronize()
     # end = time.time()
-    # print("time", end - start)
+    # print("index", index, "time", end - start, "\tanswer", ele['answer'])
     # print("response org", response)
-    # print("answer", ele['answer'])
-    # continue
+    # print("-------------------------------------------------------")
+
     # breakpoint()
+    #######################################################################################
 
     # first = True
     # total_context = system_id.copy()
@@ -100,7 +121,7 @@ for ele in data:
 
     # total_context['input_ids'] = torch.cat([total_context['input_ids'], question_id['input_ids']], dim=1)
     # total_context['attention_mask'] = torch.cat([total_context['attention_mask'], question_id['attention_mask']], dim=1)
-    # output = model.generate(**total_context, max_new_tokens=max_new_tokens, past_key_values=past_key_values, do_sample=True)
+    # output = model.generate(**total_context, max_new_tokens=max_new_tokens, past_key_values=past_key_values, do_sample=False)
     # _, input_len = total_context['input_ids'].shape
     # response = tokenizer.decode(output[0, input_len:])
     # torch.cuda.synchronize()
@@ -108,6 +129,27 @@ for ele in data:
     # print("time", end - start)
     # print("response", response)
 
+    # prompt_qwen = text_qwen.replace('$DOC$', context.strip())
+    # choice_question_qwen = question_qwen.replace('$Q$', ele['question'].strip()).replace('$C_A$', ele['choice_A'].strip()).replace('$C_B$', ele['choice_B'].strip()).replace('$C_C$', ele['choice_C'].strip()).replace('$C_D$', ele['choice_D'].strip())
+    # messages = [
+        # {
+            # 'role': 'user',
+            # 'content': [
+                # {
+                    # 'system': system_qwen
+                # },
+                # {
+                    # 'context': prompt_qwen
+                # },
+                # {
+                    # 'question': choice_question_qwen
+                # },
+            # ]
+        # },
+    # ]
+    # bot.run(messages)
+
+    #######################################################################################
     first = True
     total_context = system_id.copy()
     torch.cuda.synchronize()
@@ -120,17 +162,13 @@ for ele in data:
     total_context['attention_mask'] = torch.cat([total_context['attention_mask'], question_id['attention_mask']], dim=1)
 
     current = 0
-    question_id = 0
     while current < seqlen:
-        if question_id < 143:
-            continue
         current_end = min(current + page_size, seqlen)
         input_ids['input_ids'] = input_ids_all['input_ids'][:, current:current_end]
         input_ids['attention_mask'] = input_ids_all['attention_mask'][:, current:current_end]
         input_ids['input_ids'] = torch.cat([system_id['input_ids'], input_ids['input_ids']], dim=1)
         input_ids['attention_mask'] = torch.cat([system_id['attention_mask'], input_ids['attention_mask']], dim=1)
         current = current_end
-
         output = model.generate(**input_ids, max_new_tokens=1, return_dict_in_generate=True)
         # _, input_len = input_ids['input_ids'].shape
         # response = tokenizer.decode(output["sequences"][0, input_len:])
@@ -145,15 +183,16 @@ for ele in data:
 
     print("seqlen:", seqlen, "\tpage_size:", page_size, "\tpage num:", seqlen // page_size + 1)
 
-    output = model.generate(**total_context, max_new_tokens=max_new_tokens, past_key_values=past_key_values, do_sample=True)
+    output = model.generate(**total_context, max_new_tokens=max_new_tokens, past_key_values=past_key_values, do_sample=False)
     _, input_len = total_context['input_ids'].shape
     response = tokenizer.decode(output[0, input_len:])
     torch.cuda.synchronize()
     end = time.time()
-    print("question_id", question_id, "time", end - start, "\tanswer", ele['answer'])
+    print("index", index, "time", end - start, "\tanswer", ele['answer'])
     print("response", response)
     print("-------------------------------------------------------")
 
+    #######################################################################################
     # generation_config, model_kwargs = model._prepare_generation_config(generation_config=None)
     # input_ids, model_input_name, model_kwargs = model._prepare_model_inputs(
         # input_ids, generation_config.bos_token_id, model_kwargs
